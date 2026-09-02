@@ -26,7 +26,7 @@ function loadDotEnv(filename = '.env'): void {
 }
 
 function portFromEnv(value: string | undefined): number {
-  if (value === undefined || value === '') return 3000;
+  if (value === undefined || value === '') return 8033;
   const port = Number(value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be an integer between 1 and 65535');
   return port;
@@ -45,8 +45,9 @@ const pageRenderer = (pathname: string): string | undefined => {
   return detail ? renderDetailHtml(decodeURIComponent(detail[1])) : undefined;
 };
 const api = new BugApiServer({ ...process.env, ...config, DRY_RUN: true }, { repo, queue, attachments, pageRenderer });
-const port = await api.listen(portFromEnv(process.env.PORT), '127.0.0.1');
-console.log(`LLM Bugfix local verification server is ready at http://127.0.0.1:${port}`);
+const host = process.env.BUGFIX_LISTEN_HOST ?? '127.0.0.1';
+const port = await api.listen(portFromEnv(process.env.PORT), host);
+console.log(`LLM Bugfix local verification server is ready at http://${host}:${port}`);
 console.log('External LLM, vision, Git, and repair worker are disabled; submitted reports stay in the local queue.');
 
 let closing = false;

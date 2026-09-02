@@ -5,6 +5,11 @@ import { resolve } from 'node:path';
 
 const outputDir = resolve('.local-build');
 const outputFile = resolve(outputDir, 'local-server.mjs');
+const listenAllInterfaces = process.argv.slice(2).includes('--host');
+const serverEnv = {
+  ...process.env,
+  ...(listenAllInterfaces ? { BUGFIX_LISTEN_HOST: '0.0.0.0' } : {}),
+};
 let server;
 let restartChain = Promise.resolve();
 let stopping = false;
@@ -25,7 +30,7 @@ async function restartServer() {
   await stopServer();
   server = spawn(process.execPath, [outputFile], {
     cwd: process.cwd(),
-    env: process.env,
+    env: serverEnv,
     stdio: 'inherit',
   });
   server.once('error', (error) => console.error(`Unable to start local server: ${error.message}`));

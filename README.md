@@ -10,7 +10,7 @@ pnpm test
 pnpm build
 ```
 
-For a safe local UI/API check (SQLite, attachments and queue only; no external service or repair worker), run `pnpm dev` and open `http://127.0.0.1:3000/`. This is an esbuild watch workflow; use `pnpm typecheck` separately for full TypeScript checking. See [USAGE.md](USAGE.md) for details.
+For a safe local UI/API check (SQLite, attachments and queue only; no external service or repair worker), run `pnpm dev` and open `http://127.0.0.1:8033/`. To listen on all interfaces, use `pnpm dev -- --host`. This is an esbuild watch workflow; use `pnpm typecheck` separately for full TypeScript checking. See [USAGE.md](USAGE.md) for details.
 
 `@llmbugfix/bug-domain` contains the V4 Zod contracts and lifecycle state machine. `@llmbugfix/bug-repository` initializes SQLite with WAL, foreign keys, and a five-second busy timeout and exports Drizzle tables and a transactional repository.
 

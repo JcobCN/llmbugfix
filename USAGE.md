@@ -103,7 +103,7 @@ pnpm install --offline --frozen-lockfile
 pnpm dev
 ```
 
-浏览器打开 `http://127.0.0.1:3000/`；Dashboard 是 `http://127.0.0.1:3000/dashboard`，健康检查是 `http://127.0.0.1:3000/api/health/ready`。首次启动会在 `DATA_ROOT`（默认 `data/`）创建 SQLite 数据库、附件目录和队列锁文件。使用 `Ctrl+C` 正常停止，会释放锁文件。可通过 `PORT=3001 pnpm dev` 改端口；监听地址固定为 `127.0.0.1`，因为当前 API 尚未实现认证授权。
+浏览器打开 `http://127.0.0.1:8033/`；Dashboard 是 `http://127.0.0.1:8033/dashboard`，健康检查是 `http://127.0.0.1:8033/api/health/ready`。首次启动会在 `DATA_ROOT`（默认 `data/`）创建 SQLite 数据库、附件目录和队列锁文件。使用 `Ctrl+C` 正常停止，会释放锁文件。可通过 `PORT=3000 pnpm dev` 改端口；默认监听地址为 `127.0.0.1`，如需监听所有地址，使用 `pnpm dev -- --host`（监听 `0.0.0.0`）。当前 API 尚未实现认证授权，暴露到局域网前请确认网络可信。
 
 `pnpm dev` 使用 esbuild 打包并监听 TypeScript 源码；每次成功重建会自动重启本地 Node 服务，通常不需要等待完整 TypeScript 编译。它只负责快速转换，不做完整类型检查；提交前仍应运行 `pnpm typecheck`、`pnpm test` 和 `pnpm build`。`pnpm start` 保持为完整 `tsc` 构建后启动的验证命令，适合一次性手工验证。每次启动保留本地 `data/` 中的记录。若需要全新演示数据，请在服务停止后自行换一个 `DATA_ROOT`，例如 `DATA_ROOT=tmp-demo pnpm dev`。
 
@@ -145,7 +145,7 @@ const api = new BugApiServer({ ...process.env, ...config }, {
 });
 
 orchestrator.start(2_000);
-await api.listen(Number(process.env.PORT ?? 3000), '127.0.0.1');
+await api.listen(Number(process.env.PORT ?? 8033), '127.0.0.1');
 ```
 
 上段是宿主集成骨架，不是仓库中现成的启动脚本；尖括号导入路径必须由宿主替换，不能原样执行。`apps/orchestrator` 没有声明可安装的 workspace 包名，宿主应按实际构建输出导入该类，或自行配置路径。挂载页面时，宿主应将 `/` 返回 `renderIndexHtml()`、`/dashboard` 返回 `renderDashboardHtml()`、`/bugs/:id` 返回 `renderDetailHtml(id)`，并把 API 请求转发到同一个 `BugApiServer`。`BugApiServer.listen()` 返回实际端口，关闭时调用 `api.close()`、`orchestrator.stop()`、`queue.close()` 和 `db.close()`。
