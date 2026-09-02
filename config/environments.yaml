@@ -1,0 +1,35 @@
+ # Repository values are supplied by deployment environment variables.
+environments:
+  - id: frontend-main
+    name: Frontend Main Web Application
+    target: frontend
+    repository: "${FRONTEND_MAIN_REPOSITORY}"
+    defaultBranch: main
+    markdown:
+      - environments/frontend-main/ENVIRONMENT.md
+      - environments/frontend-main/TESTING.md
+    skills:
+      - .pi/skills/frontend-runtime/SKILL.md
+      - .pi/skills/frontend-testing/SKILL.md
+    setupCommands:
+      - "pnpm install --offline --frozen-lockfile"
+    validationCommands:
+      - "pnpm test --offline"
+      - "pnpm typecheck"
+
+  - id: backend-main
+    name: Backend Core API Service
+    target: backend
+    repository: "${BACKEND_MAIN_REPOSITORY}"
+    defaultBranch: main
+    markdown:
+      - environments/backend-main/ENVIRONMENT.md
+      - environments/backend-main/TESTING.md
+    skills:
+      - .pi/skills/backend-runtime/SKILL.md
+      - .pi/skills/backend-testing/SKILL.md
+    setupCommands:
+      - "pnpm install --offline --frozen-lockfile"
+    validationCommands:
+      - "pnpm test --offline"
+      - "pnpm typecheck"

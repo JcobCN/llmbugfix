@@ -1,0 +1,50 @@
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { z } from 'zod';
+import { redactSecrets } from '@llmbugfix/shared';
+import { ValidationResultSchema, type ValidationResult } from '@llmbugfix/bug-domain';
+
+export interface CommandExecutionResult { command: string; args: string[]; exitCode: number; stdout: string; stderr: string; timedOut: boolean; timeout: boolean; aborted: boolean; }
+export interface CommandRunnerOptions { allowedCwdRoots?: string[]; maxOutputChars?: number; env?: NodeJS.ProcessEnv; }
+const inside = (root: string, value: string) => value === root || value.startsWith(`${root}${path.sep}`);
+
+/** Executes argv directly. It deliberately has no shell mode and validates cwd. */
+export class CommandRunner {
+  private readonly roots: string[];
+  private readonly maxOutputChars: number;
+  private readonly env: NodeJS.ProcessEnv;
+  constructor(options: CommandRunnerOptions = {}) { this.roots = (options.allowedCwdRoots ?? []).map((root) => fs.realpathSync.native(path.resolve(root))); this.maxOutputChars = options.maxOutputChars ?? 50_000; this.env = { ...process.env, ...options.env, CI: '1' }; }
+  private checkCwd(cwd: string): string { const resolved = path.resolve(cwd); if (!this.roots.length) return resolved; let real: string; try { real = fs.realpathSync.native(resolved); } catch { throw new Error(`cwd does not exist: ${cwd}`); } if (!this.roots.some((root) => inside(root, real))) throw new Error(`cwd is outside the configured allowlist: ${cwd}`); return real; }
+  async run(command: string, args: string[] = [], options: { cwd: string; timeoutMs?: number; signal?: AbortSignal; maxOutputChars?: number }): Promise<CommandExecutionResult> {
+    if (!command || /[;&|<>`$\n\r]/.test(command)) throw new Error('Shell metacharacters are not permitted in command executable');
+    const cwd = this.checkCwd(options.cwd); const timeoutMs = options.timeoutMs ?? 60_000; const max = options.maxOutputChars ?? this.maxOutputChars;
+    return new Promise((resolve) => {
+      let stdout = '', stderr = '', timedOut = false, aborted = false, settled = false; let killTimer: NodeJS.Timeout | undefined;
+      const append = (old: string, data: Buffer | string) => { const next = old + data.toString(); return next.length > max ? `${next.slice(0, max)}\n... [TRUNCATED]` : next; };
+      const child = spawn(command, args, { cwd, shell: false, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      const sanitize = (value: string) => { let safe = String(redactSecrets(value)); for (const [key, secret] of Object.entries(this.env)) if (secret && /password|passwd|token|secret|api[_-]?key|authorization|cookie/i.test(key) && secret.length >= 3) safe = safe.split(secret).join('[REDACTED]'); return safe; };
+      const finish = (exitCode: number) => { if (settled) return; settled = true; clearTimeout(timer); if (killTimer) clearTimeout(killTimer); resolve({ command, args: [...args], exitCode, stdout: sanitize(stdout), stderr: sanitize(stderr), timedOut, timeout: timedOut, aborted }); };
+      const abort = () => { if (settled) return; aborted = true; child.kill('SIGTERM'); killTimer = setTimeout(() => child.kill('SIGKILL'), 1_000); };
+      const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); killTimer = setTimeout(() => child.kill('SIGKILL'), 1_000); }, timeoutMs);
+      if (options.signal?.aborted) abort(); else options.signal?.addEventListener('abort', abort, { once: true }); child.stdout.on('data', (data) => { stdout = append(stdout, data); }); child.stderr.on('data', (data) => { stderr = append(stderr, data); }); child.on('error', (error) => { stderr = append(stderr, error.message); finish(1); }); child.on('close', (code, signal) => finish(code ?? (signal ? 1 : 0)));
+    });
+  }
+}
+export async function runCommand(command: string, args: string[], cwd: string, timeoutMs = 60_000, maxOutputChars = 50_000, signal?: AbortSignal): Promise<CommandExecutionResult> { return new CommandRunner({ maxOutputChars }).run(command, args, { cwd, timeoutMs, signal }); }
+
+export const ValidationCommandResultSchema = z.object({ command: z.string(), exitCode: z.number().int(), passed: z.boolean(), timedOut: z.boolean(), timeout: z.boolean(), stdout: z.string(), stderr: z.string(), output: z.string() }).strict();
+export type ValidationCommandResult = z.infer<typeof ValidationCommandResultSchema>;
+export const DeterministicValidationSchema = z.object({ passed: z.boolean(), commands: z.array(z.string()), results: z.array(ValidationCommandResultSchema), summary: z.string(), artifacts: z.array(z.string()) }).strict();
+export type DeterministicValidation = z.infer<typeof DeterministicValidationSchema>;
+export class Validator {
+  constructor(private readonly runner = new CommandRunner()) {}
+  async runValidation(worktreeDir: string, validationCommands: string[], options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<ValidationResult & { results: ValidationCommandResult[] }> {
+    const results: ValidationCommandResult[] = [];
+    for (const raw of validationCommands) { const [bin, ...args] = parseCommand(raw); if (!bin) continue; const result = await this.runner.run(bin, args, { cwd: worktreeDir, timeoutMs: options.timeoutMs ?? 120_000, signal: options.signal }); const passed = result.exitCode === 0 && !result.timedOut && !result.aborted; results.push({ command: raw, exitCode: result.exitCode, passed, timedOut: result.timedOut, timeout: result.timedOut, stdout: result.stdout, stderr: result.stderr, output: `${result.stdout}\n${result.stderr}`.trim() }); }
+    const passed = results.every((r) => r.passed); const base = ValidationResultSchema.parse({ passed, commands: validationCommands, results, summary: passed ? 'All validation checks passed.' : 'Validation checks failed.', artifacts: [] });
+    return { ...base, results } as ValidationResult & { results: ValidationCommandResult[] };
+  }
+}
+/** Parse a simple configured argv string while rejecting shell syntax. */
+export function parseCommand(value: string): string[] { if (/[;&|<>`$\n\r]/.test(value)) throw new Error('Shell metacharacters are not permitted in configured commands'); const out: string[] = []; let current = '', quote = '', escaped = false; for (const char of value.trim()) { if (escaped) { current += char; escaped = false; continue; } if (char === '\\' && quote !== "'") { escaped = true; continue; } if (quote) { if (char === quote) quote = ''; else current += char; continue; } if (char === '"' || char === "'") { quote = char; continue; } if (/\s/.test(char)) { if (current) { out.push(current); current = ''; } } else current += char; } if (escaped || quote) throw new Error('Malformed configured command'); if (current) out.push(current); return out; }

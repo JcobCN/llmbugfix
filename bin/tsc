@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec /data/tj/llmbugfix/node_modules/.bin/tsc "$@"

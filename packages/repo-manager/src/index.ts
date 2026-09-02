@@ -1,0 +1,46 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { CommandRunner } from '@llmbugfix/validator';
+
+export interface RepoManagerOptions { worktreesRoot?: string; worktreeRoot?: string; repositoryRoot?: string; repositoryRoots?: string[]; allowedRemoteHost?: string; allowedRemoteHosts?: string[]; protectedBranches?: string[]; commandRunner?: CommandRunner; }
+export interface GitOperationResult { exitCode: number; stdout: string; stderr: string; timedOut: boolean; }
+const within = (root: string, value: string) => value === root || value.startsWith(`${root}${path.sep}`);
+const BUG = /^BUG-[0-9]{6,}$/;
+
+export class RepoManager {
+  private readonly worktreesRoot: string;
+  private readonly repositoryRoots: string[];
+  private readonly allowedRemoteHosts: string[];
+  private readonly protectedBranches: string[];
+  private readonly runner: CommandRunner;
+  constructor(worktreesRootOrOptions: string | RepoManagerOptions, allowedHosts: string[] = []) {
+    const options: RepoManagerOptions = typeof worktreesRootOrOptions === 'string' ? { worktreesRoot: worktreesRootOrOptions, allowedRemoteHosts: allowedHosts } : worktreesRootOrOptions;
+    this.worktreesRoot = path.resolve(options.worktreesRoot ?? options.worktreeRoot ?? path.join(process.cwd(), 'data/worktrees')); fs.mkdirSync(this.worktreesRoot, { recursive: true });
+    this.repositoryRoots = (options.repositoryRoots ?? (options.repositoryRoot ? [options.repositoryRoot] : [])).map((root) => { const resolved = path.resolve(root); return fs.existsSync(resolved) ? fs.realpathSync.native(resolved) : resolved; });
+    this.allowedRemoteHosts = options.allowedRemoteHosts ?? (options.allowedRemoteHost ? [options.allowedRemoteHost] : []);
+    this.protectedBranches = options.protectedBranches ?? ['main', 'master', 'develop', 'release'];
+    this.runner = options.commandRunner ?? new CommandRunner({ allowedCwdRoots: this.repositoryRoots.length ? [this.worktreesRoot, ...this.repositoryRoots] : [] });
+  }
+  private repoPath(repo: string): string { const resolved = path.resolve(repo); if (!fs.existsSync(resolved)) throw new Error(`Repository does not exist: ${repo}`); const real = fs.realpathSync.native(resolved); if (!fs.statSync(real).isDirectory() || !fs.existsSync(path.join(real, '.git'))) throw new Error(`Not a git repository: ${repo}`); if (this.repositoryRoots.length && !this.repositoryRoots.some((root) => within(root, real))) throw new Error(`Repository is outside configured roots: ${repo}`); return real; }
+  private worktreePath(bugKey: string): string { if (!BUG.test(bugKey)) throw new Error(`Invalid bug key: ${bugKey}`); const target = path.resolve(this.worktreesRoot, bugKey); if (!within(this.worktreesRoot, target)) throw new Error('Worktree escapes configured root'); return target; }
+  public validateRepoUrl(repoUrl: string): void { if (path.isAbsolute(repoUrl) || fs.existsSync(repoUrl)) { this.repoPath(repoUrl); return; } const parsed = this.remoteHost(repoUrl); if (this.allowedRemoteHosts.length && !this.allowedRemoteHosts.includes(parsed)) throw new Error(`Remote host is not allowed: ${parsed}`); }
+  public createBranchName(bugKey: string, title: string): string { if (!BUG.test(bugKey)) throw new Error(`Invalid bug key: ${bugKey}`); const slug = title.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48).replace(/-+$/g, '') || 'fix'; return `ai/${bugKey}-${slug}`; }
+  private async git(cwd: string, args: string[], timeoutMs = 120_000): Promise<GitOperationResult> { const result = await this.runner.run('git', args, { cwd, timeoutMs }); return result; }
+  async fetch(repoDir: string, baseBranch = 'main'): Promise<GitOperationResult> { const repo = this.repoPath(repoDir); return this.git(repo, ['fetch', 'origin', baseBranch]); }
+  async setupWorktree(bugKey: string, repoDirOrUrl: string, branchName = this.createBranchName(bugKey, 'fix'), baseBranch = 'main'): Promise<string> {
+    const repo = this.repoPath(repoDirOrUrl); const expectedBranch = new RegExp(`^ai/${bugKey}-[a-z0-9]+(?:-[a-z0-9]+)*$`); if (!expectedBranch.test(branchName)) throw new Error(`Unsafe branch name: ${branchName}`);
+    const target = this.worktreePath(bugKey); if (fs.existsSync(target)) throw new Error(`Worktree already exists: ${target}`);
+    let base = `origin/${baseBranch}`; const hasOrigin = await this.git(repo, ['remote', 'get-url', 'origin']); if (hasOrigin.exitCode === 0) { const fetched = await this.fetch(repo, baseBranch); if (fetched.exitCode !== 0) throw new Error(`git fetch failed: ${fetched.stderr}`); } else base = 'HEAD';
+    fs.mkdirSync(path.dirname(target), { recursive: true }); const result = await this.git(repo, ['worktree', 'add', '-b', branchName, target, base]); if (result.exitCode !== 0) throw new Error(`git worktree add failed: ${result.stderr}`); return target;
+  }
+  async createWorktree(bugKey: string, repoDirOrUrl: string, branchName?: string, baseBranch = 'main'): Promise<string> { return this.setupWorktree(bugKey, repoDirOrUrl, branchName ?? this.createBranchName(bugKey, 'fix'), baseBranch); }
+  async diff(worktreePath: string): Promise<string> { const result = await this.git(this.checkedWorktree(worktreePath), ['diff', '--binary', 'HEAD']); if (result.exitCode !== 0) throw new Error(result.stderr); return result.stdout; }
+  private checkedWorktree(value: string): string { const resolved = path.resolve(value); if (!within(this.worktreesRoot, resolved)) throw new Error(`Worktree is outside configured root: ${value}`); if (!fs.existsSync(resolved)) throw new Error(`Worktree does not exist: ${value}`); return fs.realpathSync.native(resolved); }
+  private remoteHost(remote: string): string { try { const normalized = remote.startsWith('git@') ? `ssh://${remote.replace(':', '/')}` : remote; const parsed = new URL(normalized); if (!parsed.hostname) throw new Error('missing host'); return parsed.hostname.toLowerCase(); } catch { throw new Error(`Invalid remote URL: ${remote}`); } }
+  private async assertPushSafe(worktreePath: string, branchName: string): Promise<void> { if (!/^ai\/[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branchName) || branchName.includes('..') || branchName.includes('//')) throw new Error(`Only safe ai/* branches may be pushed: ${branchName}`); const leaf = branchName.slice(3); if (this.protectedBranches.some((item) => leaf === item || leaf.startsWith(`${item}/`)) || ['main', 'master', 'develop'].includes(branchName)) throw new Error(`Protected branch cannot be pushed: ${branchName}`); const current = await this.git(worktreePath, ['branch', '--show-current']); if (current.exitCode !== 0 || current.stdout.trim() !== branchName) throw new Error('Current branch does not match requested branch'); const remote = await this.git(worktreePath, ['remote', 'get-url', 'origin']); if (remote.exitCode !== 0) throw new Error('origin remote is required'); const host = this.remoteHost(remote.stdout.trim()); if (!this.allowedRemoteHosts.length || !this.allowedRemoteHosts.includes(host)) throw new Error(`Remote host is not allowed: ${host}`); }
+  async commit(worktreePath: string, message: string): Promise<string> { const cwd = this.checkedWorktree(worktreePath); const add = await this.git(cwd, ['add', '--all']); if (add.exitCode !== 0) throw new Error(add.stderr); const commit = await this.git(cwd, ['commit', '-m', message]); if (commit.exitCode !== 0) throw new Error(commit.stderr); const rev = await this.git(cwd, ['rev-parse', 'HEAD']); if (rev.exitCode !== 0) throw new Error(rev.stderr); return rev.stdout.trim(); }
+  async push(worktreePath: string, branchName: string): Promise<void> { const cwd = this.checkedWorktree(worktreePath); await this.assertPushSafe(cwd, branchName); const result = await this.git(cwd, ['push', '--set-upstream', 'origin', branchName]); if (result.exitCode !== 0) throw new Error(result.stderr); }
+  async commitAndPush(worktreePath: string, branchName: string, message: string, dryRun = false): Promise<{ commitSha: string | null; pushed: boolean }> { const cwd = this.checkedWorktree(worktreePath); if (dryRun) { const rev = await this.git(cwd, ['rev-parse', 'HEAD']); return { commitSha: rev.exitCode === 0 ? rev.stdout.trim() : null, pushed: false }; } await this.assertPushSafe(cwd, branchName); const sha = await this.commit(cwd, message); await this.push(cwd, branchName); return { commitSha: sha, pushed: true }; }
+  async cleanup(worktreePath: string): Promise<void> { const target = this.checkedWorktree(worktreePath); const result = await this.git(this.worktreesRoot, ['worktree', 'remove', '--force', target]); if (result.exitCode !== 0) throw new Error(result.stderr); }
+  cleanupWorktree(bugKey: string): void { const target = this.worktreePath(bugKey); if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true }); }
+}
