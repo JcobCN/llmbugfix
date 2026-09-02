@@ -23,12 +23,14 @@ export type QueueLike = {
 type EnvironmentSource = {
     listProfiles(): unknown[];
 };
+export type PageRenderer = (pathname: string) => string | undefined;
 export type ApiDependencies = {
     repo: BugRepository;
     intake?: IntakeService;
     queue?: QueueLike;
     environments?: EnvironmentSource;
     attachments?: Parameters<typeof createAttachmentRoutes>[0]['attachments'];
+    pageRenderer?: PageRenderer;
 };
 export type InjectRequest = {
     method?: string;
@@ -64,6 +66,7 @@ export declare class BugApiServer {
     private readonly intake;
     private readonly environments?;
     private readonly queue?;
+    private readonly pageRenderer?;
     private readonly apiConfig;
     private readonly attachmentRoutes?;
     private readonly logger;

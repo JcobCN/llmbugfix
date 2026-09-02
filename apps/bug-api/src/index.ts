@@ -20,7 +20,8 @@ export type QueueLike = {
   recoverStaleJobs?: (timeoutMs?: number) => QueueJobLike[];
 };
 type EnvironmentSource = { listProfiles(): unknown[] };
-export type ApiDependencies = { repo: BugRepository; intake?: IntakeService; queue?: QueueLike; environments?: EnvironmentSource; attachments?: Parameters<typeof createAttachmentRoutes>[0]['attachments'] };
+export type PageRenderer = (pathname: string) => string | undefined;
+export type ApiDependencies = { repo: BugRepository; intake?: IntakeService; queue?: QueueLike; environments?: EnvironmentSource; attachments?: Parameters<typeof createAttachmentRoutes>[0]['attachments']; pageRenderer?: PageRenderer };
 export type InjectRequest = { method?: string; url: string; headers?: Record<string, string>; body?: unknown };
 export type InjectResponse<T = unknown> = { status: number; headers: Record<string, string>; data: T; raw: string };
 export const DEFAULT_API_CONFIG = {
@@ -66,6 +67,7 @@ const jsonBody = async (request: http.IncomingMessage): Promise<Record<string, u
   return parsed as Record<string, unknown>;
 };
 const send = (response: http.ServerResponse, status: number, body: unknown): void => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, idempotency-key', 'access-control-allow-methods': 'GET,POST,PATCH,OPTIONS' }); response.end(JSON.stringify(body)); };
+const sendHtml = (response: http.ServerResponse, body: string): void => { response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-content-type-options': 'nosniff' }); response.end(body); };
 const conversationResponse = (repo: BugRepository, conversation: BugConversation) => ({ ...conversation, messages: repo.listMessages(conversation.id) });
 
 function updateConversation(repo: BugRepository, id: string, draft: BugReportDraft, completeness: ReturnType<typeof evaluateCompleteness>, status?: BugConversation['status']): BugConversation {
@@ -79,6 +81,7 @@ export class BugApiServer {
   private readonly intake: IntakeService;
   private readonly environments?: EnvironmentSource;
   private readonly queue?: QueueLike;
+  private readonly pageRenderer?: PageRenderer;
   private readonly apiConfig: ReturnType<typeof resolveApiConfig>;
   private readonly attachmentRoutes?: ReturnType<typeof createAttachmentRoutes>;
   private readonly logger = createLogger('bug-api');
@@ -87,7 +90,7 @@ export class BugApiServer {
     this.apiConfig = resolveApiConfig(config);
     const dependencyValue = repoOrDeps ?? (config as ApiDependencies);
     if (!dependencyValue || typeof dependencyValue !== 'object') throw new Error('BugApiServer requires repository dependencies');
-    if ('repo' in dependencyValue) { this.repo = dependencyValue.repo; this.intake = dependencyValue.intake ?? intake ?? new IntakeService(); this.environments = dependencyValue.environments; this.queue = dependencyValue.queue ?? queue; this.attachmentRoutes = dependencyValue.attachments ? createAttachmentRoutes({ attachments: dependencyValue.attachments, repo: this.repo }) : undefined; }
+    if ('repo' in dependencyValue) { this.repo = dependencyValue.repo; this.intake = dependencyValue.intake ?? intake ?? new IntakeService(); this.environments = dependencyValue.environments; this.queue = dependencyValue.queue ?? queue; this.pageRenderer = dependencyValue.pageRenderer; this.attachmentRoutes = dependencyValue.attachments ? createAttachmentRoutes({ attachments: dependencyValue.attachments, repo: this.repo }) : undefined; }
     else { this.repo = dependencyValue as SQLiteBugRepository; this.intake = intake ?? new IntakeService(); this.environments = envResolver; this.queue = queue; this.attachmentRoutes = this.attachmentService && typeof this.attachmentService === 'object' ? createAttachmentRoutes({ attachments: this.attachmentService as Parameters<typeof createAttachmentRoutes>[0]['attachments'], repo: this.repo }) : undefined; }
     this.server = http.createServer((request, response) => { void this.handle(request, response); });
   }
@@ -150,6 +153,8 @@ export class BugApiServer {
         send(response, 200, { bugs, items: bugs, total: bugs.length, filters: { status: status ?? null, target: target ?? null, q: query || null } }); return;
       }
       if (bugMatch) { await this.handleBug(bugMatch[1], bugMatch[2], method, response); return; }
+      const page = method === 'GET' ? this.pageRenderer?.(path) : undefined;
+      if (page !== undefined) { sendHtml(response, page); return; }
       send(response, 404, { error: 'Route not found' });
     } catch (error) { this.logger.error(safeLogContext({ path, method, error: error instanceof Error ? error.message : String(error) }), 'request failed'); send(response, error instanceof SyntaxError ? 400 : 500, { error: error instanceof Error ? error.message : String(error) }); }
   }

@@ -4,10 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "start": "pnpm build && node apps/bug-api/src/local-server.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "eslint packages/*/src",
-    "build": "tsc -b --pretty false"
+    "build": "tsc -b --pretty false && node scripts/prepare-local-dist.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",
@@ -20,6 +22,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.20.1",
     "@typescript-eslint/parser": "^8.19.1",
+    "esbuild": "0.21.5",
     "eslint": "^9.17.0",
     "typescript": "^5.9.3",
     "vitest": "^2.1.9"

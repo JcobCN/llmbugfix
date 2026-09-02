@@ -33,6 +33,9 @@ importers:
       '@typescript-eslint/parser':
         specifier: ^8.19.1
         version: 8.68.0(eslint@9.39.5)(typescript@5.9.3)
+      esbuild:
+        specifier: 0.21.5
+        version: 0.21.5
       eslint:
         specifier: ^9.17.0
         version: 9.39.5
@@ -42,6 +45,44 @@ importers:
       vitest:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@22.20.1)
+
+  apps/bug-api:
+    dependencies:
+      '@llmbugfix/attachment-service':
+        specifier: workspace:*
+        version: link:../../packages/attachment-service
+      '@llmbugfix/bug-domain':
+        specifier: workspace:*
+        version: link:../../packages/bug-domain
+      '@llmbugfix/bug-repository':
+        specifier: workspace:*
+        version: link:../../packages/bug-repository
+      '@llmbugfix/intake-agent':
+        specifier: workspace:*
+        version: link:../../packages/intake-agent
+      '@llmbugfix/intake-policy':
+        specifier: workspace:*
+        version: link:../../packages/intake-policy
+      '@llmbugfix/job-queue':
+        specifier: workspace:*
+        version: link:../../packages/job-queue
+      '@llmbugfix/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@llmbugfix/vision-provider':
+        specifier: workspace:*
+        version: link:../../packages/vision-provider
+
+  apps/bug-web: {}
+
+  packages/attachment-service:
+    dependencies:
+      '@llmbugfix/bug-domain':
+        specifier: workspace:*
+        version: link:../bug-domain
+      '@llmbugfix/vision-provider':
+        specifier: workspace:*
+        version: link:../vision-provider
 
   packages/bug-domain:
     dependencies:
@@ -70,6 +111,33 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
 
+  packages/intake-agent:
+    dependencies:
+      '@llmbugfix/bug-domain':
+        specifier: workspace:*
+        version: link:../bug-domain
+      '@llmbugfix/intake-policy':
+        specifier: workspace:*
+        version: link:../intake-policy
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
+  packages/intake-policy:
+    dependencies:
+      '@llmbugfix/bug-domain':
+        specifier: workspace:*
+        version: link:../bug-domain
+
+  packages/job-queue:
+    dependencies:
+      '@llmbugfix/bug-repository':
+        specifier: workspace:*
+        version: link:../bug-repository
+      '@llmbugfix/shared':
+        specifier: workspace:*
+        version: link:../shared
+
   packages/shared:
     dependencies:
       pino:
@@ -78,6 +146,8 @@ importers:
       zod:
         specifier: ^3.24.1
         version: 3.25.76
+
+  packages/vision-provider: {}
 
 packages:
 

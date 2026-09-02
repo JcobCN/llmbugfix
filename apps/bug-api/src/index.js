@@ -62,6 +62,7 @@ const jsonBody = async (request) => {
     return parsed;
 };
 const send = (response, status, body) => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, idempotency-key', 'access-control-allow-methods': 'GET,POST,PATCH,OPTIONS' }); response.end(JSON.stringify(body)); };
+const sendHtml = (response, body) => { response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-content-type-options': 'nosniff' }); response.end(body); };
 const conversationResponse = (repo, conversation) => ({ ...conversation, messages: repo.listMessages(conversation.id) });
 function updateConversation(repo, id, draft, completeness, status) {
     const candidate = repo.getConversation(id);
@@ -77,6 +78,7 @@ export class BugApiServer {
     intake;
     environments;
     queue;
+    pageRenderer;
     apiConfig;
     attachmentRoutes;
     logger = createLogger('bug-api');
@@ -93,6 +95,7 @@ export class BugApiServer {
             this.intake = dependencyValue.intake ?? intake ?? new IntakeService();
             this.environments = dependencyValue.environments;
             this.queue = dependencyValue.queue ?? queue;
+            this.pageRenderer = dependencyValue.pageRenderer;
             this.attachmentRoutes = dependencyValue.attachments ? createAttachmentRoutes({ attachments: dependencyValue.attachments, repo: this.repo }) : undefined;
         }
         else {
@@ -218,6 +221,11 @@ export class BugApiServer {
             }
             if (bugMatch) {
                 await this.handleBug(bugMatch[1], bugMatch[2], method, response);
+                return;
+            }
+            const page = method === 'GET' ? this.pageRenderer?.(path) : undefined;
+            if (page !== undefined) {
+                sendHtml(response, page);
                 return;
             }
             send(response, 404, { error: 'Route not found' });

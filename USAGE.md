@@ -93,9 +93,23 @@ pnpm -r build
 
 ## 5. 启动和部署方式
 
-### 5.1 当前仓库的真实状态
+### 5.1 快速本地验证（推荐）
 
-仓库没有 `start` 脚本、独立 CLI 或完整 HTTP bootstrap。`apps/bug-api/src/index.ts` 导出 `BugApiServer`，`apps/bug-web/src/index.ts` 导出页面渲染函数，`apps/orchestrator/src/index.ts` 导出 `Orchestrator`；这些模块不会自行读取 `.env`、创建所有依赖、挂载页面路由或监听端口。因此不能使用未经实现的 `pnpm start`、`node apps/bug-api` 或类似命令直接启动完整系统。
+仓库提供了一个仅用于本地验证的启动入口。它会启用 SQLite、附件、本地单任务队列和三个页面，但不会启动修复 Worker，也不会调用 LLM、视觉服务、Git 或网络服务。这样可以安全验证“创建会话 → 编辑/提交 Bug → Dashboard 查看队列”的完整 UI/API 流程。
+
+```bash
+cp .env.example .env
+pnpm install --offline --frozen-lockfile
+pnpm dev
+```
+
+浏览器打开 `http://127.0.0.1:3000/`；Dashboard 是 `http://127.0.0.1:3000/dashboard`，健康检查是 `http://127.0.0.1:3000/api/health/ready`。首次启动会在 `DATA_ROOT`（默认 `data/`）创建 SQLite 数据库、附件目录和队列锁文件。使用 `Ctrl+C` 正常停止，会释放锁文件。可通过 `PORT=3001 pnpm dev` 改端口；监听地址固定为 `127.0.0.1`，因为当前 API 尚未实现认证授权。
+
+`pnpm dev` 使用 esbuild 打包并监听 TypeScript 源码；每次成功重建会自动重启本地 Node 服务，通常不需要等待完整 TypeScript 编译。它只负责快速转换，不做完整类型检查；提交前仍应运行 `pnpm typecheck`、`pnpm test` 和 `pnpm build`。`pnpm start` 保持为完整 `tsc` 构建后启动的验证命令，适合一次性手工验证。每次启动保留本地 `data/` 中的记录。若需要全新演示数据，请在服务停止后自行换一个 `DATA_ROOT`，例如 `DATA_ROOT=tmp-demo pnpm dev`。
+
+### 5.2 完整部署宿主
+
+除上节的本地验证入口外，仓库仍没有完整部署所需的 Worker/真实 Pi 依赖注入、环境 Profile 接线和生产 HTTP bootstrap。`apps/bug-api/src/index.ts` 导出 `BugApiServer`，`apps/bug-web/src/index.ts` 导出页面渲染函数，`apps/orchestrator/src/index.ts` 导出 `Orchestrator`；这些模块不会自行构造全部生产依赖。`pnpm start` 只能启动上一节所述的本地验证模式，不能启动完整修复系统。
 
 生产部署需要一个宿主入口（可由部署方放在本仓库之外，或后续补充到本仓库）来创建依赖、挂载路由并管理生命周期。下面是实际类接口对应的最小结构，示例中的 `piSdk` 和 HTTP 页面路由仍需宿主提供：
 

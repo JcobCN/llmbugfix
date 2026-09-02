@@ -1,4 +1,5 @@
 node_modules/
+.local-build/
 dist/
 .env
 data/*.db
