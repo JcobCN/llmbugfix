@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { renderIndexHtml } from './index.js';
 describe('conversational intake page', () => {
+    it('emits a parseable inline client script', () => {
+        const script = renderIndexHtml().match(/<script>([\s\S]*)<\/script>/)?.[1];
+        expect(script).toBeDefined();
+        expect(() => new Function(script)).not.toThrow();
+    });
     it('uses an editable Markdown document instead of a structured draft form', () => {
         const html = renderIndexHtml();
         expect(html).toContain('id="markdown-editor"');
