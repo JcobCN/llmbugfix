@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { FakeIntakeModel, IntakeService, mergeDraft } from './index.js';
+import { FakeDocumentReconciler, FakeIntakeModel, IntakeService, applyDocumentReconciliation, mergeBugDocument, mergeDraft, reconcileBugDocument, renderBugDocument, sha256Document } from '@llmbugfix/intake-agent';
 import type { BugReportDraft } from '@llmbugfix/bug-domain';
+import { evaluateCompleteness } from '@llmbugfix/intake-policy';
 
 describe('Intake Agent & Service', () => {
   it('processes natural language message with FakeIntakeModel', async () => {
@@ -40,5 +41,51 @@ describe('Intake Agent & Service', () => {
     expect(merged.executionTarget).toBe('backend');
     expect(merged.actualBehavior).toBe('返回 500 错误');
     expect(merged.reproduction?.steps).toEqual(['POST /api/order']);
+  });
+
+  it('extracts a conversational report without schema fields', async () => {
+    const result = await new IntakeService(new FakeIntakeModel()).processTurn({}, [], '前端登录页使用 Chrome 126，输入正确账号密码后点击登录，页面仍停在 /login，正常应该跳到 /home。');
+    expect(result.updatedDraft.executionTarget).toBe('frontend');
+    expect(result.updatedDraft.expectedBehavior).toContain('跳到 /home');
+    expect(result.updatedDraft.environment?.frontend?.browser).toBe('Chrome');
+    expect(result.updatedDraft.environment?.frontend?.browserVersion).toBe('126');
+  });
+
+  it('allows a latest chat correction to replace an old extracted value', async () => {
+    const result = await new IntakeService(new FakeIntakeModel()).processTurn({ executionTarget: 'backend', actualBehavior: '接口返回 500' }, [], '我刚才说错了，实际上是前端页面没有跳转，接口正常返回 200。', ['executionTarget']);
+    expect(result.updatedDraft.executionTarget).toBe('frontend');
+    expect(result.updatedDraft.actualBehavior).toContain('前端页面');
+  });
+
+  it('reconciles explicit Markdown edits and does not clear a missing section', () => {
+    const draft: BugReportDraft = { title: '登录问题', actualBehavior: '停留在登录页', expectedBehavior: '进入首页', reproduction: { steps: ['点击登录'], reproducible: true, frequency: 'always', prerequisites: [], testData: [] }, executionTarget: 'frontend' };
+    const result = reconcileBugDocument({ currentDraft: draft, markdown: '# 登录问题（已确认）\n\n## Actual Behavior\n页面显示错误\n\n## Expected Behavior\n进入首页\n\n## Reproduction\nunknown\n\n## Environment\n- Target: frontend\n- Browser: Edge\n', documentRevision: 3, documentSha256: sha256Document('# 登录问题（已确认）\n\n## Actual Behavior\n页面显示错误\n\n## Expected Behavior\n进入首页\n\n## Reproduction\nunknown\n\n## Environment\n- Target: frontend\n- Browser: Edge\n') });
+    expect(result.fieldUpdates.actualBehavior).toBe('页面显示错误');
+    expect(result.fieldUpdates.title).toBe('登录问题（已确认）');
+    expect(result.explicitClears).toContain('reproduction.steps');
+    expect(result.conflicts).toHaveLength(0);
+    const applied = applyDocumentReconciliation(draft, result);
+    expect(applied.actualBehavior).toBe('页面显示错误');
+    expect(applied.reproduction?.steps).toEqual([]);
+    const omitted = reconcileBugDocument({ currentDraft: draft, markdown: '# 登录问题\n\n## Expected Behavior\n进入首页\n', documentRevision: 4, documentSha256: sha256Document('# 登录问题\n\n## Expected Behavior\n进入首页\n') });
+    expect(omitted.fieldUpdates.actualBehavior).toBeUndefined();
+    expect(omitted.explicitClears).not.toContain('actualBehavior');
+  });
+
+  it('renders managed sections deterministically and preserves unknown notes', () => {
+    const draft: BugReportDraft = { title: '页面错误', actualBehavior: '显示错误', expectedBehavior: '显示首页', executionTarget: 'frontend' };
+    const markdown = mergeBugDocument('## Reporter Notes\n- 用户备注不要丢失\n', draft);
+    expect(markdown).toContain('# 页面错误');
+    expect(markdown).toContain('## Actual Behavior');
+    expect(markdown).toContain('## Reporter Notes');
+    expect(renderBugDocument(draft, evaluateCompleteness(draft))).toContain('## Missing Information');
+  });
+
+  it('does not call the reconciler for a document whose content hash is already reconciled', async () => {
+    let calls = 0;
+    const reconciler = { reconcile: () => { calls += 1; return new FakeDocumentReconciler().reconcile({ currentDraft: {}, markdown: '# x', documentRevision: 1, documentSha256: sha256Document('# x') }); } };
+    const content = '# x';
+    await new IntakeService(new FakeIntakeModel(), reconciler).processTurn({}, [], '补充一下没有日志。', [], { currentDraft: {}, markdown: content, documentRevision: 1, documentSha256: sha256Document(content), reconciledSha256: sha256Document(content) });
+    expect(calls).toBe(0);
   });
 });

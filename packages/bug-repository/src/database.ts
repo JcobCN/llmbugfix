@@ -5,6 +5,7 @@ import path from 'node:path';
 export const CREATE_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, display_name TEXT NOT NULL, email TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bug_conversations (id TEXT PRIMARY KEY, reporter_id TEXT NOT NULL REFERENCES users(id), status TEXT NOT NULL, draft TEXT NOT NULL, completeness TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS conversation_documents (conversation_id TEXT PRIMARY KEY REFERENCES bug_conversations(id) ON DELETE CASCADE, relative_path TEXT NOT NULL, revision INTEGER NOT NULL, sha256 TEXT NOT NULL, reconciled_revision INTEGER NOT NULL, reconciled_sha256 TEXT NOT NULL, sync_status TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS conversation_messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES bug_conversations(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, metadata TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bug_reports (id TEXT PRIMARY KEY, bug_key TEXT NOT NULL UNIQUE, reporter_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT REFERENCES bug_conversations(id), status TEXT NOT NULL, report TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bug_attachments (id TEXT PRIMARY KEY, bug_id TEXT NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE, attachment TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);

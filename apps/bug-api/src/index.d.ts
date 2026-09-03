@@ -1,4 +1,4 @@
-import type { SQLiteBugRepository, BugRepository } from '@llmbugfix/bug-repository';
+import { type BugDocumentStore, type SQLiteBugRepository, type BugRepository } from '@llmbugfix/bug-repository';
 import { IntakeService } from '@llmbugfix/intake-agent';
 import { createAttachmentRoutes } from './attachment-routes.js';
 type QueueJobLike = {
@@ -31,6 +31,7 @@ export type ApiDependencies = {
     environments?: EnvironmentSource;
     attachments?: Parameters<typeof createAttachmentRoutes>[0]['attachments'];
     pageRenderer?: PageRenderer;
+    documentStore?: BugDocumentStore;
 };
 export type InjectRequest = {
     method?: string;
@@ -69,14 +70,19 @@ export declare class BugApiServer {
     private readonly pageRenderer?;
     private readonly apiConfig;
     private readonly attachmentRoutes?;
+    private readonly documentStore?;
     private readonly logger;
     private readonly manualFields;
     constructor(config: unknown, repoOrDeps?: SQLiteBugRepository | ApiDependencies, intake?: IntakeService, attachmentService?: unknown | undefined, queue?: QueueLike, envResolver?: EnvironmentSource);
+    private makeDocumentStore;
     inject<T = unknown>(request: InjectRequest): Promise<InjectResponse<T>>;
     listen(port?: number, host?: string): Promise<number>;
     close(): Promise<void>;
     private handle;
     private optionalBody;
+    private readDocument;
+    private documentResponse;
+    private persistGeneratedDocument;
     private handleConversation;
     private submit;
     private handleBug;

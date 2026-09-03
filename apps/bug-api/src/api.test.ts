@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { newId } from '@llmbugfix/shared';
 import { openDatabase, SQLiteBugRepository } from '@llmbugfix/bug-repository';
 import { FakeIntakeModel, IntakeService } from '@llmbugfix/intake-agent';
@@ -56,5 +59,32 @@ describe('Bug API routes', () => {
     expect(cancelled.data.bug.status).toBe('CANCELLED');
     expect(cancelled.data.semantic).toBe('removed_from_queue');
     expect((await server.inject({ method: 'POST', url: `/api/bugs/${submitted.data.bugKey}/retry` })).status).toBe(409);
+  });
+
+  it('keeps Chat and editable Markdown synchronized through revisioned reconciliation', async () => {
+    const created = await server.inject<{ id: string; document: { content: string; revision: number; sha256: string } }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
+    const id = created.data.id; expect(created.data.document.content).toContain('## Actual Behavior');
+    const first = await server.inject<{ document: { content: string; revision: number; sha256: string }; draft: { actualBehavior?: string } }>({ method: 'POST', url: `/api/bugs/conversations/${id}/messages`, body: { content: '前端登录页面点击登录后停留在原页面，正常应该进入首页。' } });
+    expect(first.status, first.raw).toBe(200); expect(first.data.document.revision).toBeGreaterThan(created.data.document.revision); expect(first.data.document.content).toContain('停留在原页面');
+    const edited = first.data.document.content.replace(/(## Actual Behavior\n)[^\n]+/u, '$1页面显示白屏');
+    const saved = await server.inject<{ revision: number; syncStatus: string }>({ method: 'PUT', url: `/api/bugs/conversations/${id}/document`, body: { content: edited, baseRevision: first.data.document.revision } });
+    expect(saved.status, saved as unknown as string).toBe(200); expect(saved.data.syncStatus).toBe('dirty');
+    const staleMessage = await server.inject<{ code: string; document: { revision: number } }>({ method: 'POST', url: `/api/bugs/conversations/${id}/messages`, body: { content: '这条消息来自旧页面版本。', documentRevision: first.data.document.revision } });
+    expect(staleMessage.status).toBe(409); expect(staleMessage.data.code).toBe('DOCUMENT_REVISION_CONFLICT'); expect(staleMessage.data.document.revision).toBe(saved.data.revision);
+    const reconciled = await server.inject<{ document: { content: string; syncStatus: string }; draft: { actualBehavior?: string } }>({ method: 'POST', url: `/api/bugs/conversations/${id}/messages`, body: { content: '补充：这个问题每次都能复现。' } });
+    expect(reconciled.status, reconciled.raw).toBe(200); expect(reconciled.data.draft.actualBehavior).toContain('页面显示白屏'); expect(reconciled.data.document.syncStatus).toBe('synced');
+    const submitted = await server.inject<{ document: { syncStatus: string }; bugKey: string }>({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirm: true } });
+    expect(submitted.status, submitted.raw).toBe(201); expect(submitted.data.bugKey).toMatch(/^BUG-/); expect(submitted.data.document.syncStatus).toBe('synced');
+  });
+
+  it('detects an external Markdown filesystem edit on the next message', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-api-'));
+    try {
+      const localServer = new BugApiServer({ DATA_ROOT: root }, new SQLiteBugRepository(db), new IntakeService(new FakeIntakeModel()));
+      const created = await localServer.inject<{ id: string; document: { revision: number } }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
+      const filename = path.join(root, 'intake-documents', created.data.id, 'bug-report.md'); fs.writeFileSync(filename, '# 外部修改\n\n## Actual Behavior\n外部文件事实\n');
+      const response = await localServer.inject<{ draft: { actualBehavior?: string }; document: { revision: number } }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/messages`, body: { content: '继续补充信息。' } });
+      expect(response.status, response.raw).toBe(200); expect(response.data.draft.actualBehavior).toBe('外部文件事实');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 });

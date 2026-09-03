@@ -1,4 +1,4 @@
-/** Browser-only client; intake state is always read and written through the API. */
+/** Dependency-free browser pages. Intake deliberately exposes conversation + Markdown only. */
 export declare function renderIndexHtml(): string;
 /** Dashboard is deliberately server-rendered as a tiny dependency-free page.
  * All state comes from the API, so refreshes never expose a stale in-memory UI. */
