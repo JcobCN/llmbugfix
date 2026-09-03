@@ -82,6 +82,7 @@ export declare class BugApiServer {
     private optionalBody;
     private readDocument;
     private documentResponse;
+    private markDocumentConflict;
     private persistGeneratedDocument;
     private handleConversation;
     private submit;

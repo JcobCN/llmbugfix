@@ -24,6 +24,7 @@ export const DocumentReconciliationResultSchema = z.object({
   explicitClears: z.array(z.string()),
   conflicts: z.array(DocumentReconciliationConflictSchema),
   observations: z.array(z.string()),
+  reporterHypotheses: z.array(z.string()).default([]),
   documentRevision: z.number().int().nonnegative().optional(),
   documentSha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
 });
@@ -227,20 +228,30 @@ export function reconcileBugDocument(input: DocumentReconciliationInput): Docume
     if (explicitUnknown(cleaned)) { if (options.clearable) explicitClears.push(path); return; }
     if (cleaned !== current) setUpdate(updates, path, cleaned);
   };
-  if (parsed.title && !isPlaceholder(parsed.title) && !explicitUnknown(parsed.title) && parsed.title !== input.currentDraft.title) setUpdate(updates, 'title', parsed.title);
-  for (const field of ['Actual Behavior', 'Expected Behavior'] as const) markValue(field === 'Actual Behavior' ? 'actualBehavior' : 'expectedBehavior', parsed.sections.get(field), { clearable: true });
+  if (parsed.title && explicitUnknown(parsed.title)) explicitClears.push('title');
+  else if (parsed.title && !isPlaceholder(parsed.title) && parsed.title !== input.currentDraft.title) setUpdate(updates, 'title', parsed.title);
+  for (const field of ['Actual Behavior', 'Expected Behavior'] as const) {
+    if (parsed.sections.has(field)) markValue(field === 'Actual Behavior' ? 'actualBehavior' : 'expectedBehavior', parsed.sections.get(field), { clearable: true });
+  }
   const meaningful = (value: unknown): boolean => {
     if (value === undefined || value === null) return false;
     if (typeof value === 'string') return Boolean(value.trim()) && !isPlaceholder(value) && !explicitUnknown(value);
-    if (Array.isArray(value)) return value.length > 0;
+    if (Array.isArray(value)) return value.some(meaningful);
     if (typeof value === 'object') return Object.values(value as Record<string, unknown>).some(meaningful);
     return true;
   };
   // Core headings are always emitted by the renderer. If a user removes one while a known
   // value exists, surface an ambiguity instead of silently treating omission as a clear.
-  for (const [name, field] of [['Actual Behavior', 'actualBehavior'], ['Expected Behavior', 'expectedBehavior'], ['Reproduction', 'reproduction.steps'], ['Environment', 'environment'], ['Evidence', 'evidence'], ['Regression', 'regression'], ['Impact', 'impact']] as const) {
+  for (const [name, field] of [['Actual Behavior', 'actualBehavior'], ['Expected Behavior', 'expectedBehavior'], ['Reproduction', 'reproduction.steps'], ['Evidence', 'evidence'], ['Regression', 'regression'], ['Impact', 'impact']] as const) {
     if (!parsed.sections.has(name) && meaningful(getPath(input.currentDraft, field))) conflicts.push({ field, reason: 'The managed section was removed; deletion intent is ambiguous.', previousValue: getPath(input.currentDraft, field) });
   }
+  const knownEnvironment = meaningful(input.currentDraft.environment) || meaningful(input.currentDraft.executionTarget);
+  if (!parsed.sections.has('Environment') && knownEnvironment) conflicts.push({ field: 'environment', reason: 'The managed section was removed; deletion intent is ambiguous.', previousValue: input.currentDraft.environment ?? input.currentDraft.executionTarget });
+  if (!parsed.sections.has('Reporter Notes')) {
+    if (meaningful(input.currentDraft.observations)) conflicts.push({ field: 'observations', reason: 'The managed section was removed; deletion intent is ambiguous.', previousValue: input.currentDraft.observations });
+    if (meaningful(input.currentDraft.reporterHypotheses)) conflicts.push({ field: 'reporterHypotheses', reason: 'The managed section was removed; deletion intent is ambiguous.', previousValue: input.currentDraft.reporterHypotheses });
+  }
+  if ((parsed.title === undefined || isPlaceholder(parsed.title)) && meaningful(input.currentDraft.title)) conflicts.push({ field: 'title', reason: 'The managed title was removed; deletion intent is ambiguous.', previousValue: input.currentDraft.title });
 
   const reproductionBody = parsed.sections.get('Reproduction');
   if (reproductionBody !== undefined) {
@@ -326,8 +337,18 @@ export function reconcileBugDocument(input: DocumentReconciliationInput): Docume
     if (Object.keys(impact).length) setUpdate(updates, 'impact', impact);
   }
   const notesBody = parsed.sections.get('Reporter Notes');
-  if (notesBody) { observations.push(...linesOf(notesBody).map((line) => line.replace(/^(?:[-*]|\d+[.)])\s+/, '').replace(/^(?:Observation|Hypothesis):\s*/i, '').trim())); setUpdate(updates, 'observations', observations); }
-  return DocumentReconciliationResultSchema.parse({ fieldUpdates: updates, explicitClears: [...new Set(explicitClears)], conflicts, observations, documentRevision: input.documentRevision, documentSha256: input.documentSha256 });
+  const reporterHypotheses: string[] = [];
+  if (notesBody) {
+    for (const line of linesOf(notesBody)) {
+      const value = line.replace(/^(?:[-*]|\d+[.)])\s+/, '').trim();
+      const hypothesis = value.match(/^Hypothesis:\s*(.*)$/i);
+      if (hypothesis?.[1]?.trim()) reporterHypotheses.push(hypothesis[1].trim());
+      else observations.push(value.replace(/^Observation:\s*/i, '').trim());
+    }
+    setUpdate(updates, 'observations', observations);
+    setUpdate(updates, 'reporterHypotheses', reporterHypotheses);
+  }
+  return DocumentReconciliationResultSchema.parse({ fieldUpdates: updates, explicitClears: [...new Set(explicitClears)], conflicts, observations, reporterHypotheses, documentRevision: input.documentRevision, documentSha256: input.documentSha256 });
 }
 
 export class FakeDocumentReconciler implements DocumentReconciler {
@@ -550,7 +571,8 @@ export function applyDocumentReconciliation(currentDraft: BugReportDraft, result
   if (result.conflicts.length) return BugReportDraftSchema.parse(currentDraft);
   const draft = mergeDraft(currentDraft, result.fieldUpdates);
   for (const path of result.explicitClears) {
-    if (path === 'executionTarget') setPath(draft as Record<string, unknown>, path, 'unknown');
+    if (path === 'title') delete (draft as Record<string, unknown>).title;
+    else if (path === 'executionTarget') setPath(draft as Record<string, unknown>, path, 'unknown');
     else if (path === 'reproduction.steps') setPath(draft as Record<string, unknown>, path, []);
     else if (path === 'evidence') setPath(draft as Record<string, unknown>, path, emptyEvidence(draft.evidence));
     else if (path === 'evidence.errorMessages' || path === 'evidence.stackTraces') setPath(draft as Record<string, unknown>, path, []);

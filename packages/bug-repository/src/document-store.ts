@@ -28,6 +28,8 @@ export interface BugDocumentStore {
   write(conversationId: string, content: string, baseRevision: number): DocumentSnapshot;
   refresh(conversationId: string): DocumentSnapshot;
   markReconciled(conversationId: string, revision: number, sha256: string): DocumentSnapshot;
+  /** Mark a failed semantic reconciliation without advancing either reconciled marker. */
+  markConflict?(conversationId: string, revision: number, sha256: string): DocumentSnapshot;
 }
 
 type DocumentRow = { conversation_id: string; relative_path: string; revision: number; sha256: string; reconciled_revision: number; reconciled_sha256: string; sync_status: string; updated_at: string };
@@ -152,6 +154,13 @@ export class SQLiteBugDocumentStore implements BugDocumentStore {
     const current = this.refresh(conversationId);
     if (current.revision !== revision || current.sha256 !== sha256) throw new DocumentRevisionConflictError(current, 'Document changed before reconciliation completed');
     this.database.prepare('UPDATE conversation_documents SET reconciled_revision = ?, reconciled_sha256 = ?, sync_status = ?, updated_at = ? WHERE conversation_id = ? AND revision = ? AND sha256 = ?').run(revision, sha256, 'synced', new Date().toISOString(), conversationId, revision, sha256);
+    return this.load(conversationId, false);
+  }
+  markConflict(conversationId: string, revision: number, sha256: string): DocumentSnapshot {
+    if (!SHA256.test(sha256)) throw new DocumentPathError('Invalid document SHA-256');
+    const current = this.refresh(conversationId);
+    if (current.revision !== revision || current.sha256 !== sha256) throw new DocumentRevisionConflictError(current, 'Document changed before conflict could be recorded');
+    this.database.prepare('UPDATE conversation_documents SET sync_status = ?, updated_at = ? WHERE conversation_id = ? AND revision = ? AND sha256 = ?').run('conflict', new Date().toISOString(), conversationId, revision, sha256);
     return this.load(conversationId, false);
   }
   private atomicWrite(file: string, content: string): void {

@@ -9,6 +9,11 @@ describe('conversational intake page', () => {
         expect(html).toContain('flushDocument');
         expect(html).toContain('handleDocumentConflict');
         expect(html).toContain('reload-server-document');
+        expect(html).toContain('setEditorDirty');
+        expect(html).toContain('saveTimer=setTimeout');
+        expect(html).toContain('await flushDocument()');
+        expect(html).toContain('e.data&&e.data.document');
+        expect(html).toContain('本地编辑已保留');
         expect(html).toContain("localDirty=$('markdown-editor').value!==content");
         expect(html).not.toContain('id="title"');
         expect(html).not.toContain('id="target"');

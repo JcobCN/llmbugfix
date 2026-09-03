@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { newId } from '@llmbugfix/shared';
 import { openDatabase, SQLiteBugRepository } from '@llmbugfix/bug-repository';
-import { FakeIntakeModel, IntakeService } from '@llmbugfix/intake-agent';
+import { FakeIntakeModel, IntakeService, type DocumentReconciliationInput, type IntakeModelInput, type IntakeTurnResult } from '@llmbugfix/intake-agent';
 import { BugApiServer } from './index.js';
 
 describe('Bug API routes', () => {
@@ -86,5 +86,44 @@ describe('Bug API routes', () => {
       const response = await localServer.inject<{ draft: { actualBehavior?: string }; document: { revision: number } }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/messages`, body: { content: '继续补充信息。' } });
       expect(response.status, response.raw).toBe(200); expect(response.data.draft.actualBehavior).toBe('外部文件事实');
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('persists reconciliation conflicts and refuses submit until the document is fixed', async () => {
+    const conflictIntake = new IntakeService(new FakeIntakeModel(), { reconcile: (_input: DocumentReconciliationInput) => ({ fieldUpdates: {}, explicitClears: [], conflicts: [{ field: 'actualBehavior', reason: 'ambiguous edit', previousValue: 'old', documentValue: 'new' }], observations: [], reporterHypotheses: [] }) });
+    const conflictServer = new BugApiServer({}, new SQLiteBugRepository(db), conflictIntake);
+    const created = await conflictServer.inject<{ id: string; document: { content: string; revision: number; sha256: string; reconciledSha256: string } }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
+    const dirtyContent = `${created.data.document.content}\n## User Notes\nambiguous`; const saved = await conflictServer.inject<{ revision: number }>({ method: 'PUT', url: `/api/bugs/conversations/${created.data.id}/document`, body: { content: dirtyContent, baseRevision: created.data.document.revision } });
+    const message = await conflictServer.inject<{ code: string; document: { revision: number; reconciledRevision: number; sha256: string; reconciledSha256: string; syncStatus: string } }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/messages`, body: { content: '继续说明问题。' } });
+    expect(message.status, message.raw).toBe(409); expect(message.data.code).toBe('DOCUMENT_RECONCILIATION_REQUIRED'); expect(message.data.document.syncStatus).toBe('conflict'); expect(message.data.document.reconciledRevision).toBe(created.data.document.revision); expect(message.data.document.reconciledSha256).toBe(created.data.document.reconciledSha256); expect(message.data.document.revision).toBe(saved.data.revision); expect(message.data.document.sha256).not.toBe(message.data.document.reconciledSha256);
+    const submit = await conflictServer.inject<{ code: string; document: { syncStatus: string } }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/submit`, body: { confirm: true } });
+    expect(submit.status, submit.raw).toBe(409); expect(submit.data.code).toBe('DOCUMENT_RECONCILIATION_REQUIRED'); expect(submit.data.document.syncStatus).toBe('conflict');
+  });
+
+  it('re-reads and retries once when Chat CAS loses a concurrent Markdown edit', async () => {
+    let release!: () => void; let entered!: () => void; let calls = 0;
+    const started = new Promise<void>((resolve) => { entered = resolve; }); const gate = new Promise<void>((resolve) => { release = resolve; });
+    const delayedModel = { complete: async (input: IntakeModelInput): Promise<IntakeTurnResult> => { calls += 1; if (calls === 1) { entered(); await gate; } return new FakeIntakeModel().complete(input); } };
+    const concurrentServer = new BugApiServer({}, new SQLiteBugRepository(db), new IntakeService(delayedModel));
+    const created = await concurrentServer.inject<{ id: string; document: { content: string; revision: number } }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
+    const request = concurrentServer.inject<{ document: { content: string; revision: number; syncStatus: string } }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/messages`, body: { content: '描述一个页面问题。' } });
+    await started; const userEdit = `${created.data.document.content}\n\n## User Notes\nconcurrent edit must survive`; const saved = await concurrentServer.inject<{ revision: number }>({ method: 'PUT', url: `/api/bugs/conversations/${created.data.id}/document`, body: { content: userEdit, baseRevision: created.data.document.revision } });
+    release(); const result = await request;
+    expect(calls).toBe(2); expect(saved.data.revision).toBe(created.data.document.revision + 1); expect(result.status, result.raw).toBe(200); expect(result.data.document.content).toContain('concurrent edit must survive'); expect(result.data.document.syncStatus).toBe('synced');
+  });
+
+  it('returns a conflict without overwriting a second edit during the one permitted retry', async () => {
+    let releaseFirst!: () => void; let releaseSecond!: () => void; let enteredFirst!: () => void; let enteredSecond!: () => void; let calls = 0;
+    const firstStarted = new Promise<void>((resolve) => { enteredFirst = resolve; }); const secondStarted = new Promise<void>((resolve) => { enteredSecond = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; }); const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const delayedModel = { complete: async (input: IntakeModelInput): Promise<IntakeTurnResult> => { calls += 1; if (calls === 1) { enteredFirst(); await firstGate; } else if (calls === 2) { enteredSecond(); await secondGate; } return new FakeIntakeModel().complete(input); } };
+    const concurrentServer = new BugApiServer({}, new SQLiteBugRepository(db), new IntakeService(delayedModel));
+    const created = await concurrentServer.inject<{ id: string; document: { content: string; revision: number } }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
+    const request = concurrentServer.inject<{ code: string; document: { content: string; revision: number; syncStatus: string } }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/messages`, body: { content: '描述一个页面问题。' } });
+    await firstStarted;
+    const firstEdit = await concurrentServer.inject<{ revision: number }>({ method: 'PUT', url: `/api/bugs/conversations/${created.data.id}/document`, body: { content: `${created.data.document.content}\n\n## User Notes\nfirst concurrent edit`, baseRevision: created.data.document.revision } });
+    releaseFirst(); await secondStarted;
+    const secondEdit = await concurrentServer.inject<{ revision: number }>({ method: 'PUT', url: `/api/bugs/conversations/${created.data.id}/document`, body: { content: `${created.data.document.content}\n\n## User Notes\nsecond concurrent edit must survive`, baseRevision: firstEdit.data.revision } });
+    releaseSecond(); const result = await request;
+    expect(calls).toBe(2); expect(result.status, result.raw).toBe(409); expect(result.data.code).toBe('DOCUMENT_REVISION_CONFLICT'); expect(result.data.document.revision).toBe(secondEdit.data.revision); expect(result.data.document.syncStatus).toBe('conflict'); expect(result.data.document.content).toContain('second concurrent edit must survive');
   });
 });

@@ -5,7 +5,7 @@ import { URL } from 'node:url';
 import { newId, now } from '@llmbugfix/shared';
 import { BugReportSchema, type BugReportDraft, type BugConversation } from '@llmbugfix/bug-domain';
 import { DocumentPathError, DocumentRevisionConflictError, SQLiteBugDocumentStore, type BugDocumentStore, type DocumentSnapshot as StoredDocumentSnapshot, type SQLiteBugRepository, type BugRepository } from '@llmbugfix/bug-repository';
-import { IntakeService, applyDocumentReconciliation, mergeBugDocument, mergeDraft, sha256Document, type DocumentReconciliationResult } from '@llmbugfix/intake-agent';
+import { IntakeService, applyDocumentReconciliation, mergeBugDocument, mergeDraft } from '@llmbugfix/intake-agent';
 import { evaluateCompleteness } from '@llmbugfix/intake-policy';
 import { createLogger, safeLogContext } from '@llmbugfix/shared';
 import { createAttachmentRoutes } from './attachment-routes.js';
@@ -174,6 +174,15 @@ export class BugApiServer {
     const document = fallback ?? this.readDocument(id);
     return document ? { document } : {};
   }
+  private markDocumentConflict(id: string, document: StoredDocumentSnapshot): StoredDocumentSnapshot {
+    if (!this.documentStore?.markConflict) return document;
+    try { return this.documentStore.markConflict(id, document.revision, document.sha256); } catch (error) {
+      // A newer user edit won while conflict metadata was being recorded. Preserve and
+      // return that newest snapshot; never attempt to write the stale generated document.
+      if (error instanceof DocumentRevisionConflictError) return error.snapshot;
+      throw error;
+    }
+  }
   private async persistGeneratedDocument(id: string, base: StoredDocumentSnapshot, content: string): Promise<StoredDocumentSnapshot> {
     if (content === base.content) return this.documentStore!.markReconciled(id, base.revision, base.sha256);
     const written = this.documentStore!.write(id, content, base.revision);
@@ -187,16 +196,32 @@ export class BugApiServer {
       if (conversation.status === 'submitted') { send(response, 409, { error: 'Conversation has already been submitted' }); return; }
       let document = this.documentStore?.refresh(id);
       if (document && body.documentRevision !== undefined && (!Number.isInteger(body.documentRevision) || Number(body.documentRevision) !== document.revision)) { send(response, 409, { error: 'DOCUMENT_REVISION_CONFLICT', code: 'DOCUMENT_REVISION_CONFLICT', document }); return; }
-      const processed = await this.intake.processUserMessage(conversation.draft, this.repo.listMessages(id), content, [...(this.manualFields.get(id) ?? new Set<string>()), ...(Array.isArray(body.userEditedFields) ? body.userEditedFields.map(String) : [])], document ? { currentDraft: conversation.draft, markdown: document.content, documentRevision: document.revision, documentSha256: document.sha256, reconciledSha256: document.reconciledSha256 } : undefined);
-      if (processed.documentReconciliation?.conflicts.length) {
-        send(response, 409, { error: 'DOCUMENT_RECONCILIATION_REQUIRED', code: 'DOCUMENT_RECONCILIATION_REQUIRED', conflicts: processed.documentReconciliation.conflicts, ...this.documentResponse(id, document) }); return;
-      }
-      if (document && processed.documentContent !== undefined) {
-        try { document = await this.persistGeneratedDocument(id, document, processed.documentContent); } catch (error) {
-          if (error instanceof DocumentRevisionConflictError) { send(response, 409, { error: error.code, code: error.code, ...this.documentResponse(id, error.snapshot) }); return; }
-          throw error;
+      const recentMessages = this.repo.listMessages(id);
+      const editFields = [...(this.manualFields.get(id) ?? new Set<string>()), ...(Array.isArray(body.userEditedFields) ? body.userEditedFields.map(String) : [])];
+      let processed!: Awaited<ReturnType<IntakeService['processUserMessage']>>;
+      let processingDraft = conversation.draft;
+      let persisted = false;
+      // LLM/reconciliation work is intentionally outside the document lock. If the reporter
+      // edits the document while it is running, retry once from the newly-read snapshot;
+      // repeated edits return a conflict and the newest file is never overwritten.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        processed = await this.intake.processUserMessage(processingDraft, recentMessages, content, editFields, document ? { currentDraft: processingDraft, markdown: document.content, documentRevision: document.revision, documentSha256: document.sha256, reconciledSha256: document.reconciledSha256, syncStatus: document.syncStatus } : undefined);
+        if (processed.documentReconciliation?.conflicts.length) {
+          document = document ? this.markDocumentConflict(id, document) : document;
+          send(response, 409, { error: 'DOCUMENT_RECONCILIATION_REQUIRED', code: 'DOCUMENT_RECONCILIATION_REQUIRED', conflicts: processed.documentReconciliation.conflicts, ...this.documentResponse(id, document) }); return;
+        }
+        if (!document || processed.documentContent === undefined) { persisted = true; break; }
+        try { document = await this.persistGeneratedDocument(id, document, processed.documentContent); persisted = true; break; } catch (error) {
+          if (!(error instanceof DocumentRevisionConflictError) || attempt === 1) {
+            const snapshot = error instanceof DocumentRevisionConflictError ? this.markDocumentConflict(id, error.snapshot) : document;
+            send(response, 409, { error: 'DOCUMENT_REVISION_CONFLICT', code: 'DOCUMENT_REVISION_CONFLICT', document: snapshot }); return;
+          }
+          document = this.documentStore?.refresh(id);
+          if (!document) throw error;
+          processingDraft = conversation.draft;
         }
       }
+      if (!persisted) { send(response, 409, { error: 'DOCUMENT_REVISION_CONFLICT', code: 'DOCUMENT_REVISION_CONFLICT', ...this.documentResponse(id, document) }); return; }
       this.repo.appendMessage({ conversationId: id, role: 'user', content, metadata: {} });
       this.repo.appendMessage({ conversationId: id, role: 'assistant', content: processed.reply, metadata: { askedFields: processed.turn.questions.map((q) => q.field), turn: processed.turn } });
       const updated = updateConversation(this.repo, id, processed.updatedDraft, processed.completeness, processed.completeness.readyForConfirmation ? 'awaiting_confirmation' : 'active');
@@ -230,7 +255,7 @@ export class BugApiServer {
     let draft = conversation.draft;
     if (document && (document.sha256 !== document.reconciledSha256 || document.revision !== document.reconciledRevision || document.syncStatus !== 'synced')) {
       const reconciliation = await this.intake.reconcileDocument({ currentDraft: draft, markdown: document.content, documentRevision: document.revision, documentSha256: document.sha256 });
-      if (reconciliation.conflicts.length) { send(response, 409, { error: 'DOCUMENT_RECONCILIATION_REQUIRED', code: 'DOCUMENT_RECONCILIATION_REQUIRED', conflicts: reconciliation.conflicts, document }); return; }
+      if (reconciliation.conflicts.length) { document = this.markDocumentConflict(conversation.id, document); send(response, 409, { error: 'DOCUMENT_RECONCILIATION_REQUIRED', code: 'DOCUMENT_RECONCILIATION_REQUIRED', conflicts: reconciliation.conflicts, document }); return; }
       draft = applyDocumentReconciliation(draft, reconciliation);
       try { document = this.documentStore!.markReconciled(conversation.id, document.revision, document.sha256); } catch (error) { if (error instanceof DocumentRevisionConflictError) { send(response, 409, { error: error.code, code: error.code, document: error.snapshot }); return; } throw error; }
     }
