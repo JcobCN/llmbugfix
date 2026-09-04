@@ -7,6 +7,14 @@ import { ValidationResultSchema, type ValidationResult } from '@llmbugfix/bug-do
 
 export interface CommandExecutionResult { command: string; args: string[]; exitCode: number; stdout: string; stderr: string; timedOut: boolean; timeout: boolean; aborted: boolean; }
 export interface CommandRunnerOptions { allowedCwdRoots?: string[]; maxOutputChars?: number; env?: NodeJS.ProcessEnv; }
+export interface CommandProcessHandle {
+  readonly command: string;
+  readonly args: string[];
+  readonly pid: number | undefined;
+  readonly result: Promise<CommandExecutionResult>;
+  readonly isRunning: () => boolean;
+  readonly stop: (signal?: NodeJS.Signals) => Promise<void>;
+}
 const inside = (root: string, value: string) => value === root || value.startsWith(`${root}${path.sep}`);
 
 /** Executes argv directly. It deliberately has no shell mode and validates cwd. */
@@ -16,6 +24,45 @@ export class CommandRunner {
   private readonly env: NodeJS.ProcessEnv;
   constructor(options: CommandRunnerOptions = {}) { this.roots = (options.allowedCwdRoots ?? []).map((root) => fs.realpathSync.native(path.resolve(root))); this.maxOutputChars = options.maxOutputChars ?? 50_000; this.env = { ...process.env, ...options.env, CI: '1' }; }
   private checkCwd(cwd: string): string { const resolved = path.resolve(cwd); if (!this.roots.length) return resolved; let real: string; try { real = fs.realpathSync.native(resolved); } catch { throw new Error(`cwd does not exist: ${cwd}`); } if (!this.roots.some((root) => inside(root, real))) throw new Error(`cwd is outside the configured allowlist: ${cwd}`); return real; }
+  /** Start a long-lived argv process without waiting for it to exit. */
+  start(command: string, args: string[] = [], options: { cwd: string; timeoutMs?: number; maxOutputChars?: number }): CommandProcessHandle {
+    if (!command || /[;&|<>`$\n\r]/.test(command)) throw new Error('Shell metacharacters are not permitted in command executable');
+    const cwd = this.checkCwd(options.cwd); const max = options.maxOutputChars ?? this.maxOutputChars;
+    let stdout = '', stderr = '', timedOut = false, settled = false, killTimer: NodeJS.Timeout | undefined;
+    let resolveResult!: (value: CommandExecutionResult) => void;
+    const result = new Promise<CommandExecutionResult>((resolve) => { resolveResult = resolve; });
+    // Put the supervised runtime in its own process group so stop() can reap
+    // children it launched as well as the direct process.
+    const child = spawn(command, args, { cwd, shell: false, detached: true, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const append = (old: string, data: Buffer | string): string => { const next = old + data.toString(); return next.length > max ? `${next.slice(0, max)}\n... [TRUNCATED]` : next; };
+    const sanitize = (value: string): string => {
+      let safe = String(redactSecrets(value));
+      for (const [key, secret] of Object.entries(this.env)) if (secret && /password|passwd|token|secret|api[_-]?key|authorization|cookie/i.test(key) && secret.length >= 3) safe = safe.split(secret).join('[REDACTED]');
+      return safe;
+    };
+    const finish = (exitCode: number, aborted = false): void => {
+      if (settled) return; settled = true; if (killTimer) clearTimeout(killTimer); if (timer) clearTimeout(timer);
+      resolveResult({ command, args: [...args], exitCode, stdout: sanitize(stdout), stderr: sanitize(stderr), timedOut, timeout: timedOut, aborted });
+    };
+    const killProcessGroup = (signal: NodeJS.Signals): void => {
+      if (!child.pid) { child.kill(signal); return; }
+      try { process.kill(-child.pid, signal); } catch { child.kill(signal); }
+    };
+    const terminate = (signal: NodeJS.Signals = 'SIGTERM'): void => {
+      if (settled) return; killProcessGroup(signal); if (signal !== 'SIGKILL') killTimer = setTimeout(() => killProcessGroup('SIGKILL'), 1_000);
+    };
+    const timer = options.timeoutMs ? setTimeout(() => { timedOut = true; terminate(); }, options.timeoutMs) : undefined;
+    child.stdout?.on('data', (data) => { stdout = append(stdout, data); }); child.stderr?.on('data', (data) => { stderr = append(stderr, data); });
+    child.once('error', (error) => { stderr = append(stderr, error.message); finish(1); });
+    child.once('close', (code, signal) => finish(code ?? (signal ? 1 : 0), signal === 'SIGTERM' || signal === 'SIGKILL'));
+    return {
+      command, args: [...args], pid: child.pid, result,
+      isRunning: () => !settled,
+      stop: async (signal = 'SIGTERM') => { if (settled) return; terminate(signal); await result; },
+    };
+  }
+  /** Alias for callers that use the conventional child-process terminology. */
+  spawn(command: string, args: string[] = [], options: { cwd: string; timeoutMs?: number; maxOutputChars?: number }): CommandProcessHandle { return this.start(command, args, options); }
   async run(command: string, args: string[] = [], options: { cwd: string; timeoutMs?: number; signal?: AbortSignal; maxOutputChars?: number }): Promise<CommandExecutionResult> {
     if (!command || /[;&|<>`$\n\r]/.test(command)) throw new Error('Shell metacharacters are not permitted in command executable');
     const cwd = this.checkCwd(options.cwd); const timeoutMs = options.timeoutMs ?? 60_000; const max = options.maxOutputChars ?? this.maxOutputChars;

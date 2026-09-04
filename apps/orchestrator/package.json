@@ -1,0 +1,24 @@
+{
+  "name": "@llmbugfix/orchestrator",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./dist/index.js" },
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@llmbugfix/bug-domain": "workspace:*",
+    "@llmbugfix/bug-repository": "workspace:*",
+    "@llmbugfix/environment-resolver": "workspace:*",
+    "@llmbugfix/environment-runner": "workspace:*",
+    "@llmbugfix/job-queue": "workspace:*",
+    "@llmbugfix/pi-runner": "workspace:*",
+    "@llmbugfix/repo-manager": "workspace:*",
+    "@llmbugfix/shared": "workspace:*",
+    "@llmbugfix/validator": "workspace:*"
+  }
+}

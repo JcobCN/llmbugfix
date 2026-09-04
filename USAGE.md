@@ -56,6 +56,7 @@ cp .env.example .env
 | `LLM_ENDPOINT_URL` | 空 | OpenAI-compatible base URL；与 `LLM_MODEL` 同时配置后启用真实 Intake 和 Pi worker |
 | `LLM_MODEL` | 空 | endpoint 提供的模型 id |
 | `LLM_API_KEY` | 空 | 可选 endpoint credential；不得写入 prompt、日志或产物 |
+| `PI_SANDBOX_PROFILE` | 空 | 外部宿主/容器隔离配置名称；未设置时真实 Pi worker fail-closed，不会启动 |
 | `INTAKE_CONFIG_PATH` | `config/bug-intake.md` | 测试人员必须提供的信息和追问规则 |
 | `ENVIRONMENT_CONFIG_PATH` | `config/environments.yaml` | 项目/模块到受批准 repository/profile 的映射 |
 | `LLM_HOST` | `disabled://local` | 宿主构造 Intake LLM 适配器时使用的内部地址；禁用值不会发请求 |
@@ -92,7 +93,7 @@ pnpm build
 pnpm -r build
 ```
 
-注意：当前只有带 `package.json` 的 workspace 会被 `pnpm -r build` 覆盖，`apps/orchestrator` 等目录不会因此变成可直接运行的部署包；完整源码校验仍以根目录的 `pnpm build` 为准。
+注意：根目录 `pnpm build` 是本仓库的完整源码校验和本地启动产物准备步骤；它会同步每个运行时 workspace（包括 `apps/orchestrator`）的 JavaScript、声明和 source map 到 `dist/`。部署或运行前仍应先执行该命令。
 
 提交部署前应四项均通过。测试包含 API、附件、状态机、队列、环境解析、验证器、Git 管理器以及使用 fake 依赖的 pipeline E2E；它们不证明真实 Pi、内部 LLM、视觉服务、凭据、远程网络、GitLab 或生产部署可用。
 
@@ -127,13 +128,14 @@ FRONTEND_MAIN_REPOSITORY=/absolute/path/to/frontend-repo
 BACKEND_MAIN_REPOSITORY=/absolute/path/to/backend-repo
 
 DRY_RUN=true
+PI_SANDBOX_PROFILE=external-container-or-host-profile
 ```
 
 然后仍然只运行 `pnpm dev`。启动入口会把同一个 endpoint 接给 Intake、Pi Fixer 和 Pi Reviewer，加载 Intake Markdown 与 environment profiles，校验每个 repository 是批准的本地 Git checkout，并在同一进程启动单 worker。任一 LLM 配置只填写一半、Markdown 不可读、Profile 环境变量缺失或 repository 无效都会直接报配置错误，不会静默使用 Fake Agent。
 
 Endpoint 必须兼容 OpenAI Chat Completions，并支持 tool calls/function calling；Pi 负责完整的 Agent/tool loop。Fixer 可使用 `read/grep/find/ls/edit/write/bash`，Reviewer 只有 `read/grep/find/ls`。两者使用独立的内存 session，不读取服务器用户的全局 Pi extensions、skills、prompts 或 context。
 
-第一版 Pi 的内置 `bash` 尚未接入容器或系统级 sandbox；Prompt 中的“禁止网络、push、deploy”只是行为约束。因此只能对受信任的 Bug、受信任的 repository 和隔离测试机启用真实 worker。保持 `DRY_RUN=true` 只会禁止最后的 commit/push，并不会限制 Fixer 在 worktree 中执行 shell 命令。
+Pi 的内置 `bash` 本身不是系统级 sandbox；Prompt 中的“禁止网络、push、deploy”也只是行为约束。`PI_SANDBOX_PROFILE` 是一个部署声明，不会自行创建隔离：宿主必须实际以受限容器、VM、seccomp/AppArmor 或等效机制运行 worker。未设置时入口 fail-closed，不启动真实 worker。保持 `DRY_RUN=true` 只会禁止最后的 commit/push，并不会替代宿主隔离。
 
 ## 6. 测试人员提交 Bug
 

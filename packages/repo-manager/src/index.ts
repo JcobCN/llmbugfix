@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { CommandRunner } from '@llmbugfix/validator';
 
 export interface RepoManagerOptions { worktreesRoot?: string; worktreeRoot?: string; repositoryRoot?: string; repositoryRoots?: string[]; allowedRemoteHost?: string; allowedRemoteHosts?: string[]; protectedBranches?: string[]; commandRunner?: CommandRunner; }
@@ -24,13 +25,32 @@ export class RepoManager {
   private repoPath(repo: string): string { const resolved = path.resolve(repo); if (!fs.existsSync(resolved)) throw new Error(`Repository does not exist: ${repo}`); const real = fs.realpathSync.native(resolved); if (!fs.statSync(real).isDirectory() || !fs.existsSync(path.join(real, '.git'))) throw new Error(`Not a git repository: ${repo}`); if (this.repositoryRoots.length && !this.repositoryRoots.some((root) => within(root, real))) throw new Error(`Repository is outside configured roots: ${repo}`); return real; }
   private worktreePath(bugKey: string): string { if (!BUG.test(bugKey)) throw new Error(`Invalid bug key: ${bugKey}`); const target = path.resolve(this.worktreesRoot, bugKey); if (!within(this.worktreesRoot, target)) throw new Error('Worktree escapes configured root'); return target; }
   public validateRepoUrl(repoUrl: string): void { if (path.isAbsolute(repoUrl) || fs.existsSync(repoUrl)) { this.repoPath(repoUrl); return; } const parsed = this.remoteHost(repoUrl); if (this.allowedRemoteHosts.length && !this.allowedRemoteHosts.includes(parsed)) throw new Error(`Remote host is not allowed: ${parsed}`); }
-  public createBranchName(bugKey: string, title: string): string { if (!BUG.test(bugKey)) throw new Error(`Invalid bug key: ${bugKey}`); const slug = title.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48).replace(/-+$/g, '') || 'fix'; return `ai/${bugKey}-${slug}`; }
+  public createBranchName(bugKey: string, title: string): string {
+    if (!BUG.test(bugKey)) throw new Error(`Invalid bug key: ${bugKey}`);
+    const slug = title.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48).replace(/-+$/g, '');
+    // A title made entirely of non-Latin characters must still identify the
+    // bug. A short deterministic digest keeps refs ASCII and avoids the old
+    // unhelpful `...-fix` collision.
+    const suffix = slug || `title-${createHash('sha256').update(title).digest('hex').slice(0, 10)}`;
+    return `ai/${bugKey}-${suffix}`;
+  }
   private async git(cwd: string, args: string[], timeoutMs = 120_000): Promise<GitOperationResult> { const result = await this.runner.run('git', args, { cwd, timeoutMs }); return result; }
   async fetch(repoDir: string, baseBranch = 'main'): Promise<GitOperationResult> { const repo = this.repoPath(repoDir); return this.git(repo, ['fetch', 'origin', baseBranch]); }
   async setupWorktree(bugKey: string, repoDirOrUrl: string, branchName = this.createBranchName(bugKey, 'fix'), baseBranch = 'main'): Promise<string> {
     const repo = this.repoPath(repoDirOrUrl); const expectedBranch = new RegExp(`^ai/${bugKey}-[a-z0-9]+(?:-[a-z0-9]+)*$`); if (!expectedBranch.test(branchName)) throw new Error(`Unsafe branch name: ${branchName}`);
-    const target = this.worktreePath(bugKey); if (fs.existsSync(target)) throw new Error(`Worktree already exists: ${target}`);
+    const target = this.worktreePath(bugKey);
+    // Always ask Git to clear the exact validated target. The directory can
+    // already be gone while Git still has a worktree registration or branch
+    // from a failed prior attempt; checking fs.existsSync alone misses that.
+    await this.cleanup(target, repo, branchName);
     let base = `origin/${baseBranch}`; const hasOrigin = await this.git(repo, ['remote', 'get-url', 'origin']); if (hasOrigin.exitCode === 0) { const fetched = await this.fetch(repo, baseBranch); if (fetched.exitCode !== 0) throw new Error(`git fetch failed: ${fetched.stderr}`); } else base = 'HEAD';
+    // A previous cleanup can leave the AI branch after its worktree directory
+    // disappeared. It is safe to recycle only this validated bug branch.
+    const existingBranch = await this.git(repo, ['show-ref', '--verify', `refs/heads/${branchName}`]);
+    if (existingBranch.exitCode === 0) {
+      const removed = await this.git(repo, ['branch', '-D', '--', branchName]);
+      if (removed.exitCode !== 0) throw new Error(`Existing AI branch cannot be recycled: ${removed.stderr}`);
+    }
     fs.mkdirSync(path.dirname(target), { recursive: true }); const result = await this.git(repo, ['worktree', 'add', '-b', branchName, target, base]); if (result.exitCode !== 0) throw new Error(`git worktree add failed: ${result.stderr}`); return target;
   }
   async createWorktree(bugKey: string, repoDirOrUrl: string, branchName?: string, baseBranch = 'main'): Promise<string> { return this.setupWorktree(bugKey, repoDirOrUrl, branchName ?? this.createBranchName(bugKey, 'fix'), baseBranch); }
@@ -41,6 +61,35 @@ export class RepoManager {
   async commit(worktreePath: string, message: string): Promise<string> { const cwd = this.checkedWorktree(worktreePath); const add = await this.git(cwd, ['add', '--all']); if (add.exitCode !== 0) throw new Error(add.stderr); const commit = await this.git(cwd, ['commit', '-m', message]); if (commit.exitCode !== 0) throw new Error(commit.stderr); const rev = await this.git(cwd, ['rev-parse', 'HEAD']); if (rev.exitCode !== 0) throw new Error(rev.stderr); return rev.stdout.trim(); }
   async push(worktreePath: string, branchName: string): Promise<void> { const cwd = this.checkedWorktree(worktreePath); await this.assertPushSafe(cwd, branchName); const result = await this.git(cwd, ['push', '--set-upstream', 'origin', branchName]); if (result.exitCode !== 0) throw new Error(result.stderr); }
   async commitAndPush(worktreePath: string, branchName: string, message: string, dryRun = false): Promise<{ commitSha: string | null; pushed: boolean }> { const cwd = this.checkedWorktree(worktreePath); if (dryRun) { const rev = await this.git(cwd, ['rev-parse', 'HEAD']); return { commitSha: rev.exitCode === 0 ? rev.stdout.trim() : null, pushed: false }; } await this.assertPushSafe(cwd, branchName); const sha = await this.commit(cwd, message); await this.push(cwd, branchName); return { commitSha: sha, pushed: true }; }
-  async cleanup(worktreePath: string): Promise<void> { const target = this.checkedWorktree(worktreePath); const result = await this.git(this.worktreesRoot, ['worktree', 'remove', '--force', target]); if (result.exitCode !== 0) throw new Error(result.stderr); }
-  cleanupWorktree(bugKey: string): void { const target = this.worktreePath(bugKey); if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true }); }
+  private looseWorktreePath(value: string): string {
+    const resolved = path.resolve(value); if (!within(this.worktreesRoot, resolved)) throw new Error(`Worktree is outside configured root: ${value}`); return resolved;
+  }
+  private async repositoryForCleanup(target: string, repositoryRoot?: string): Promise<string | null> {
+    if (repositoryRoot) return this.repoPath(repositoryRoot);
+    for (const root of this.repositoryRoots) {
+      if (!fs.existsSync(root)) continue;
+      const result = await this.git(root, ['worktree', 'list', '--porcelain']);
+      if (result.exitCode === 0 && result.stdout.includes(target)) return root;
+    }
+    return null;
+  }
+  /** Remove a registered worktree via its main repository, then only clean a
+   * residual directory once Git confirms it is no longer registered. */
+  async cleanup(worktreePath: string, repositoryRoot?: string, branchName?: string): Promise<void> {
+    const target = this.looseWorktreePath(worktreePath); const repo = await this.repositoryForCleanup(target, repositoryRoot);
+    if (!repo) { if (!fs.existsSync(target)) return; throw new Error(`Cannot identify the Git repository for worktree: ${target}`); }
+    const result = await this.git(repo, ['worktree', 'remove', '--force', target]);
+    if (result.exitCode !== 0) {
+      const listed = await this.git(repo, ['worktree', 'list', '--porcelain']);
+      if (listed.exitCode !== 0 || listed.stdout.includes(target)) throw new Error(result.stderr || `git worktree remove failed: ${target}`);
+    }
+    if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true });
+    if (branchName && expectedAiBranch(branchName)) {
+      const branch = await this.git(repo, ['branch', '-D', '--', branchName]);
+      if (branch.exitCode !== 0 && !/not found|not exist/i.test(branch.stderr)) throw new Error(branch.stderr);
+    }
+  }
+  async cleanupWorktree(bugKey: string, repositoryRoot?: string, branchName?: string): Promise<void> { await this.cleanup(this.worktreePath(bugKey), repositoryRoot, branchName); }
 }
+
+const expectedAiBranch = (branch: string): boolean => /^ai\/BUG-[0-9]{6,}-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(branch);

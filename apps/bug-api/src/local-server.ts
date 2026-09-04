@@ -11,7 +11,7 @@ import { PiAgentRunner } from '@llmbugfix/pi-runner';
 import { RepoManager } from '@llmbugfix/repo-manager';
 import { parseConfig } from '@llmbugfix/shared';
 import { CommandRunner, Validator } from '@llmbugfix/validator';
-import { Orchestrator } from '../../orchestrator/src/index.js';
+import { Orchestrator } from '@llmbugfix/orchestrator';
 import { renderDashboardHtml, renderDetailHtml, renderIndexHtml } from '../../bug-web/src/index.js';
 import { BugApiServer } from './index.js';
 
@@ -64,7 +64,10 @@ const attachments = new AttachmentService(path.join(config.DATA_ROOT, 'attachmen
 const endpointUrl = process.env.LLM_ENDPOINT_URL?.trim();
 const model = process.env.LLM_MODEL?.trim();
 if (Boolean(endpointUrl) !== Boolean(model)) throw new Error('LLM_ENDPOINT_URL and LLM_MODEL must be configured together');
-const workerEnabled = Boolean(endpointUrl && model);
+// Pi's bash tool is not a sandbox. Require an explicit host-level sandbox
+// profile before starting any real intake/fixer worker.
+const sandboxProfile = process.env.PI_SANDBOX_PROFILE?.trim();
+const workerEnabled = Boolean(endpointUrl && model && sandboxProfile);
 let environmentResolver: EnvironmentResolver | undefined;
 let intake: IntakeService | undefined;
 let orchestrator: Orchestrator | undefined;
@@ -88,6 +91,8 @@ if (workerEnabled) {
     endpointUrl: endpointUrl!, model: model!, apiKey: process.env.LLM_API_KEY?.trim() || undefined,
     fixerTimeoutMs: positiveInteger(process.env.FIXER_TIMEOUT_MS, 2_700_000, 'FIXER_TIMEOUT_MS'),
     reviewerTimeoutMs: positiveInteger(process.env.REVIEWER_TIMEOUT_MS, 900_000, 'REVIEWER_TIMEOUT_MS'),
+    requireSandbox: true,
+    sandboxProfile,
   });
   orchestrator = new Orchestrator(config, repo, queue, environmentResolver, repoManager, environmentRunner, agentRunner, new Validator(commandRunner), { dryRun: process.env.DRY_RUN !== 'false' });
 }
@@ -102,8 +107,8 @@ const host = process.env.BUGFIX_LISTEN_HOST ?? '127.0.0.1';
 const port = await api.listen(portFromEnv(process.env.PORT), host);
 orchestrator?.start();
 console.log(`LLM Bugfix local verification server is ready at http://${host}:${port}`);
-console.log(workerEnabled ? `Real Intake and Pi repair worker are enabled with model ${model}.` : 'LLM and repair worker are disabled; submitted reports stay in the local queue. Configure LLM_ENDPOINT_URL and LLM_MODEL to enable them.');
-if (workerEnabled) console.warn('WARNING: Pi bash sandbox is not enabled in this first version; run only trusted repositories on an isolated test host.');
+console.log(workerEnabled ? `Real Intake and Pi repair worker are enabled with model ${model}.` : endpointUrl && model ? 'LLM and repair worker are disabled; submitted reports stay in the local queue. Configure PI_SANDBOX_PROFILE to enable the externally isolated worker.' : 'LLM and repair worker are disabled; submitted reports stay in the local queue. Configure LLM_ENDPOINT_URL and LLM_MODEL to enable them.');
+if (endpointUrl && model && !sandboxProfile) console.warn('WARNING: real repair worker disabled; set PI_SANDBOX_PROFILE to an externally enforced sandbox profile before enabling Pi bash.');
 
 let closing = false;
 const shutdown = async (signal: string): Promise<void> => {

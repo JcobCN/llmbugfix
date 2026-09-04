@@ -70,6 +70,14 @@ describe('conversational intake page', () => {
     }
   });
 
+  it('embeds detail ids as safe JSON strings without HTML entity corruption', () => {
+    const html = renderDetailHtml('a&b</script>');
+    expect(html).toContain('"a\\u0026b\\u003c/script\\u003e"');
+    expect(html).not.toContain('a&amp;b');
+    expect([...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]).toHaveLength(1);
+    expect(() => new Function(html.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? '')).not.toThrow();
+  });
+
   it('uses an editable Markdown document instead of a structured draft form', () => {
     const html = renderIndexHtml();
     expect(html).toContain('id="markdown-editor"');

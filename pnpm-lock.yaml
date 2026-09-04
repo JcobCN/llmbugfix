@@ -60,6 +60,12 @@ importers:
       '@llmbugfix/bug-repository':
         specifier: workspace:*
         version: link:../../packages/bug-repository
+      '@llmbugfix/environment-resolver':
+        specifier: workspace:*
+        version: link:../../packages/environment-resolver
+      '@llmbugfix/environment-runner':
+        specifier: workspace:*
+        version: link:../../packages/environment-runner
       '@llmbugfix/intake-agent':
         specifier: workspace:*
         version: link:../../packages/intake-agent
@@ -69,14 +75,56 @@ importers:
       '@llmbugfix/job-queue':
         specifier: workspace:*
         version: link:../../packages/job-queue
+      '@llmbugfix/orchestrator':
+        specifier: workspace:*
+        version: link:../orchestrator
+      '@llmbugfix/pi-runner':
+        specifier: workspace:*
+        version: link:../../packages/pi-runner
+      '@llmbugfix/repo-manager':
+        specifier: workspace:*
+        version: link:../../packages/repo-manager
       '@llmbugfix/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@llmbugfix/validator':
+        specifier: workspace:*
+        version: link:../../packages/validator
       '@llmbugfix/vision-provider':
         specifier: workspace:*
         version: link:../../packages/vision-provider
 
   apps/bug-web: {}
+
+  apps/orchestrator:
+    dependencies:
+      '@llmbugfix/bug-domain':
+        specifier: workspace:*
+        version: link:../../packages/bug-domain
+      '@llmbugfix/bug-repository':
+        specifier: workspace:*
+        version: link:../../packages/bug-repository
+      '@llmbugfix/environment-resolver':
+        specifier: workspace:*
+        version: link:../../packages/environment-resolver
+      '@llmbugfix/environment-runner':
+        specifier: workspace:*
+        version: link:../../packages/environment-runner
+      '@llmbugfix/job-queue':
+        specifier: workspace:*
+        version: link:../../packages/job-queue
+      '@llmbugfix/pi-runner':
+        specifier: workspace:*
+        version: link:../../packages/pi-runner
+      '@llmbugfix/repo-manager':
+        specifier: workspace:*
+        version: link:../../packages/repo-manager
+      '@llmbugfix/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@llmbugfix/validator':
+        specifier: workspace:*
+        version: link:../../packages/validator
 
   packages/attachment-service:
     dependencies:
@@ -114,6 +162,27 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
 
+  packages/environment-resolver:
+    dependencies:
+      '@llmbugfix/shared':
+        specifier: workspace:*
+        version: link:../shared
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
+  packages/environment-runner:
+    dependencies:
+      '@llmbugfix/environment-resolver':
+        specifier: workspace:*
+        version: link:../environment-resolver
+      '@llmbugfix/validator':
+        specifier: workspace:*
+        version: link:../validator
+
   packages/intake-agent:
     dependencies:
       '@llmbugfix/bug-domain':
@@ -141,6 +210,33 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  packages/pi-runner:
+    dependencies:
+      '@earendil-works/pi-coding-agent':
+        specifier: 0.84.4
+        version: 0.84.4(ws@8.21.3)(zod@3.25.76)
+      '@llmbugfix/bug-domain':
+        specifier: workspace:*
+        version: link:../bug-domain
+      '@llmbugfix/environment-resolver':
+        specifier: workspace:*
+        version: link:../environment-resolver
+      '@llmbugfix/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@llmbugfix/validator':
+        specifier: workspace:*
+        version: link:../validator
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
+  packages/repo-manager:
+    dependencies:
+      '@llmbugfix/validator':
+        specifier: workspace:*
+        version: link:../validator
+
   packages/shared:
     dependencies:
       pino:
@@ -149,6 +245,15 @@ importers:
       zod:
         specifier: ^3.24.1
         version: 3.25.76
+
+  packages/validator:
+    dependencies:
+      '@llmbugfix/bug-domain':
+        specifier: workspace:*
+        version: link:../bug-domain
+      '@llmbugfix/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/vision-provider: {}
 

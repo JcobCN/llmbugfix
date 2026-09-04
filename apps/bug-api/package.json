@@ -5,5 +5,5 @@
   "exports": { ".": "./dist/index.js" },
   "types": "dist/index.d.ts",
   "scripts": { "lint": "eslint src", "typecheck": "tsc --noEmit", "test": "vitest run", "build": "tsc" },
-  "dependencies": { "@llmbugfix/attachment-service": "workspace:*", "@llmbugfix/bug-domain": "workspace:*", "@llmbugfix/bug-repository": "workspace:*", "@llmbugfix/intake-agent": "workspace:*", "@llmbugfix/intake-policy": "workspace:*", "@llmbugfix/job-queue": "workspace:*", "@llmbugfix/shared": "workspace:*", "@llmbugfix/vision-provider": "workspace:*" }
+  "dependencies": { "@llmbugfix/attachment-service": "workspace:*", "@llmbugfix/bug-domain": "workspace:*", "@llmbugfix/bug-repository": "workspace:*", "@llmbugfix/environment-resolver": "workspace:*", "@llmbugfix/environment-runner": "workspace:*", "@llmbugfix/intake-agent": "workspace:*", "@llmbugfix/intake-policy": "workspace:*", "@llmbugfix/job-queue": "workspace:*", "@llmbugfix/orchestrator": "workspace:*", "@llmbugfix/pi-runner": "workspace:*", "@llmbugfix/repo-manager": "workspace:*", "@llmbugfix/shared": "workspace:*", "@llmbugfix/validator": "workspace:*", "@llmbugfix/vision-provider": "workspace:*" }
 }

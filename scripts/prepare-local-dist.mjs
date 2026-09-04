@@ -13,12 +13,30 @@ const packages = [
   'intake-agent',
   'vision-provider',
   'attachment-service',
+  'job-queue',
+  'environment-resolver',
+  'environment-runner',
+  'pi-runner',
+  'repo-manager',
+  'validator',
 ];
 const outputFile = /(?:\.js|\.d\.ts|\.map)$/u;
 for (const name of packages) {
   const source = resolve('packages', name, 'src');
   if (!existsSync(source)) continue;
   cpSync(source, resolve('packages', name, 'dist'), {
+    recursive: true,
+    filter: (entry) => statSync(entry).isDirectory() || outputFile.test(entry),
+  });
+}
+
+// The local server imports the orchestrator through its workspace export as
+// well, so mirror its emitted runtime files just like the package modules.
+const appPackages = ['orchestrator'];
+for (const name of appPackages) {
+  const source = resolve('apps', name, 'src');
+  if (!existsSync(source)) continue;
+  cpSync(source, resolve('apps', name, 'dist'), {
     recursive: true,
     filter: (entry) => statSync(entry).isDirectory() || outputFile.test(entry),
   });

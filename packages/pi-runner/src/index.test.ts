@@ -125,4 +125,10 @@ describe('PiAgentRunner', () => {
     const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, sessionFactory: async () => ({ session: sessionReturning(JSON.stringify({ ...fixResult, bugKey: 'BUG-999999' })) }) });
     await expect(runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' })).rejects.toThrow('expected BUG-000001');
   });
+
+  it('fails closed when a real fixer has no host sandbox profile', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, requireSandbox: true, sessionFactory: async () => ({ session: sessionReturning(JSON.stringify(fixResult)) }) });
+    await expect(runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' })).rejects.toThrow(/sandbox/i);
+  });
 });

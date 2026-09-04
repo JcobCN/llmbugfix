@@ -20,7 +20,7 @@ export const EnvironmentProfileSchema = z.object({
   docsPath: relativePath.optional(), skillPath: relativePath.optional(), markdown: z.array(relativePath).default([]), skills: z.array(relativePath).default([]),
   documentationPaths: z.array(relativePath).default([]), skillPaths: z.array(relativePath).default([]),
   setupCommands: z.array(command).default([]), validationCommands: z.array(command).default([]), setup: z.array(command).default([]), validation: z.array(command).default([]),
-  runtime: z.object({ startCommand: command.optional(), start: command.optional(), stopCommand: command.optional(), healthCheck: z.string().optional(), startupTimeoutSeconds: z.number().int().positive().default(120) }).optional()
+  runtime: z.object({ startCommand: command.optional(), start: command.optional(), stopCommand: command.optional(), stop: command.optional(), healthCheck: z.string().optional(), startupTimeoutSeconds: z.number().int().positive().default(120), detached: z.boolean().optional(), startDetached: z.boolean().optional() }).optional()
 }).superRefine((value, ctx) => {
   if (!value.repository && !value.repoUrl) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['repository'], message: 'repository is required' });
   if (!value.target && !value.type) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['target'], message: 'target/type is required' });

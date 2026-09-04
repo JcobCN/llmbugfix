@@ -604,6 +604,13 @@ export class IntakeService {
     if (document && !isDocumentFresh) {
       documentReconciliation = await this.reconcileDocument({ ...document, documentSha256: actualSha! });
       reconciledDraft = applyDocumentReconciliation(currentDraft, documentReconciliation);
+      // Ambiguous edits are an API-level conflict. Do not spend an additional
+      // model turn on a draft which cannot be safely persisted; callers retain
+      // documentReconciliation to return the 409 details unchanged.
+      if (documentReconciliation.conflicts.length) {
+        const conflictTurn = IntakeTurnResultSchema.parse({ fieldUpdates: {}, observations: [], reporterHypotheses: [], contradictions: [], possibleSensitiveData: false, executionTargetConfidence: 0, questions: [], readyForConfirmation: false });
+        return { turn: conflictTurn, updatedDraft: BugReportDraftSchema.parse(currentDraft), reply: '', completeness: evaluateCompleteness(currentDraft), documentReconciliation, documentContent: undefined };
+      }
     }
     const turn = await this.model.complete({ currentDraft: reconciledDraft, relevantMessages: relevant, latestMessage: userText, userEditedFields, ...(document ? { markdown: document.markdown, documentRevision: document.documentRevision, documentSha256: actualSha } : {}) });
     let updatedDraft = mergeDraft(reconciledDraft, turn.fieldUpdates);

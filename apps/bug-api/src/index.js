@@ -624,19 +624,29 @@ export class BugApiServer {
         const queued = jobs.find((job) => job.status === 'QUEUED');
         const status = this.statusFor(bug);
         const safeBug = ['QUEUED', 'NEEDS_INFO', 'PREPARING_ENV', 'FIXING'].includes(status);
-        if (!safeBug && !running && !queued) {
+        // A running queue row alone is not enough: VALIDATING/REVIEWING/PUSHING
+        // are deliberately not cancellable, so never report a state the DB did
+        // not accept.
+        if (!safeBug) {
             send(response, 409, { error: `Bug ${bug.bugKey} is not safely cancellable`, status, cancellable: false });
             return;
         }
         let job = null;
-        if ((running || queued) && this.queue?.cancelJob)
-            job = this.queue.cancelJob((running ?? queued).id);
+        try {
+            if ((running || queued) && this.queue?.cancelJob)
+                job = this.queue.cancelJob((running ?? queued).id);
+        }
+        catch (error) {
+            send(response, 409, { error: error instanceof Error ? error.message : String(error), status, cancellable: false });
+            return;
+        }
         let updated = bug;
-        if (safeBug) {
-            try {
-                updated = this.repo.changeBugStatus(bug.bugKey, 'CANCELLED', 'manual_cancel');
-            }
-            catch { /* queue cancellation remains authoritative */ }
+        try {
+            updated = this.repo.changeBugStatus(bug.bugKey, 'CANCELLED', 'manual_cancel');
+        }
+        catch (error) {
+            send(response, 409, { error: error instanceof Error ? error.message : String(error), status, cancellable: false });
+            return;
         }
         send(response, 200, { bug: { ...updated, status: 'CANCELLED' }, job, cancelled: true, status: 'CANCELLED', semantic: running ? 'interrupt_requested' : 'removed_from_queue' });
     }

@@ -40,7 +40,9 @@ export declare class Orchestrator {
     private writeArtifact;
     private writeRawArtifact;
     private transition;
+    private attachmentsFor;
     private taskFor;
+    private checkpoint;
     private processJob;
 }
 //# sourceMappingURL=index.d.ts.map

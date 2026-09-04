@@ -1,12 +1,9 @@
 {
-  "name": "@llmbugfix/job-queue",
+  "name": "@llmbugfix/environment-runner",
   "version": "0.1.0",
   "type": "module",
   "exports": { ".": "./dist/index.js" },
   "types": "dist/index.d.ts",
   "scripts": { "lint": "eslint src", "typecheck": "tsc --noEmit", "test": "vitest run", "build": "tsc" },
-  "dependencies": {
-    "@llmbugfix/bug-repository": "workspace:*",
-    "@llmbugfix/shared": "workspace:*"
-  }
+  "dependencies": { "@llmbugfix/environment-resolver": "workspace:*", "@llmbugfix/validator": "workspace:*" }
 }

@@ -61,6 +61,17 @@ describe('Bug API routes', () => {
     expect((await server.inject({ method: 'POST', url: `/api/bugs/${submitted.data.bugKey}/retry` })).status).toBe(409);
   });
 
+  it('does not claim cancellation for a state outside the cancellation transitions', async () => {
+    const created = await server.inject<{ id: string }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
+    await server.inject({ method: 'PATCH', url: `/api/bugs/conversations/${created.data.id}/draft`, body: { draft: { title: 'validation cancellation', actualBehavior: 'broken', expectedBehavior: 'works', executionTarget: 'frontend' } } });
+    const submitted = await server.inject<{ bugKey: string }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/submit`, body: { confirm: true } });
+    const repository = (server as unknown as { repo: SQLiteBugRepository }).repo;
+    for (const status of ['TRIAGING', 'QUEUED', 'PREPARING_ENV', 'FIXING', 'VALIDATING'] as const) repository.changeBugStatus(submitted.data.bugKey, status);
+    const cancelled = await server.inject<{ status: string; cancellable: boolean }>({ method: 'POST', url: `/api/bugs/${submitted.data.bugKey}/cancel` });
+    expect(cancelled.status).toBe(409); expect(cancelled.data.cancellable).toBe(false);
+    expect((await server.inject<{ status: string }>({ url: `/api/bugs/${submitted.data.bugKey}/progress` })).data.status).toBe('VALIDATING');
+  });
+
   it('rejects an unapproved project/profile before creating an executable bug', async () => {
     const repo = new SQLiteBugRepository(db);
     const protectedServer = new BugApiServer({}, {

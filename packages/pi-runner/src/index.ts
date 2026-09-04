@@ -40,6 +40,7 @@ export interface FixerInput {
   docs?: Array<{ path: string; content: string }>;
   skills?: Array<{ path: string; content: string }>;
   attachments?: Array<{ id: string; text?: string; analysis?: string }>;
+  signal?: AbortSignal;
 }
 
 export interface ReviewerInput {
@@ -49,6 +50,7 @@ export interface ReviewerInput {
   diff: string;
   filesChanged: string[];
   validation: DeterministicValidation;
+  signal?: AbortSignal;
 }
 
 export interface AgentRunner {
@@ -125,6 +127,10 @@ export interface PiAgentRunnerOptions {
   modelRuntimeFactory?: () => Promise<PiModelRuntime>;
   /** Thin seam around createAgentSession; the Pi agent loop remains Pi-owned. */
   sessionFactory?: PiSessionFactory;
+  /** Require a host-level sandbox declaration before enabling fixer bash. */
+  requireSandbox?: boolean;
+  /** Name/path of an externally enforced sandbox profile or launcher. */
+  sandboxProfile?: string;
 }
 
 export class PiAgentRunnerTimeoutError extends Error {
@@ -231,6 +237,8 @@ export class PiAgentRunner implements AgentRunner {
   private readonly modelRuntime?: PiModelRuntime;
   private readonly modelRuntimeFactory?: () => Promise<PiModelRuntime>;
   private readonly sessionFactory: PiSessionFactory;
+  private readonly requireSandbox: boolean;
+  private readonly sandboxProfile?: string;
   private runtimePromise?: Promise<PiModelRuntime>;
 
   constructor(options: PiAgentRunnerOptions = {}) {
@@ -256,6 +264,8 @@ export class PiAgentRunner implements AgentRunner {
       settingsManager: sessionOptions.settingsManager,
       thinkingLevel: 'off',
     }).then((result) => ({ session: result.session })));
+    this.requireSandbox = options.requireSandbox ?? false;
+    this.sandboxProfile = options.sandboxProfile ?? process.env.PI_SANDBOX_PROFILE;
   }
 
   private async getRuntime(): Promise<PiModelRuntime> {
@@ -296,7 +306,9 @@ export class PiAgentRunner implements AgentRunner {
     return this.runtimePromise;
   }
 
-  private async runRole<T>(role: 'fixer' | 'reviewer', cwd: string, prompt: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>): Promise<T> {
+  private async runRole<T>(role: 'fixer' | 'reviewer', cwd: string, prompt: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, signal?: AbortSignal): Promise<T> {
+    if (role === 'fixer' && this.requireSandbox && !this.sandboxProfile) throw new Error('Pi fixer is disabled: PI_SANDBOX_PROFILE must name an externally enforced sandbox');
+    if (signal?.aborted) throw new Error('Pi session cancelled');
     const runtime = await this.getRuntime();
     const model = runtime.getModel(PROVIDER_ID, this.modelName);
     if (!model) throw new Error(`Pi model is unavailable: ${PROVIDER_ID}/${this.modelName}`);
@@ -332,7 +344,8 @@ export class PiAgentRunner implements AgentRunner {
           reject(new PiAgentRunnerTimeoutError(role, timeoutMs));
         }, timeoutMs);
       });
-      return await Promise.race([operation, timeout]);
+      const cancelled = signal ? new Promise<never>((_, reject) => signal.addEventListener('abort', () => { void Promise.resolve(session.abort()).catch(() => undefined); reject(new Error(`Pi ${role} session cancelled`)); }, { once: true })) : undefined;
+      return await Promise.race(cancelled ? [operation, timeout, cancelled] : [operation, timeout]);
     } finally {
       if (timer) clearTimeout(timer);
       // `timedOut` is kept explicit to make the cancellation intent visible;
@@ -345,7 +358,7 @@ export class PiAgentRunner implements AgentRunner {
   async runFixer(input: FixerInput): Promise<AgentFixResultChecked> {
     const task = BugFixTaskSchema.parse(input.task);
     const profile = EnvironmentProfileSchema.parse(input.profile);
-    const result = await this.runRole('fixer', input.worktreePath, fixerPrompt({ ...input, task, profile }, input.safety || this.safety), StrictFixResultSchema);
+    const result = await this.runRole('fixer', input.worktreePath, fixerPrompt({ ...input, task, profile }, input.safety || this.safety), StrictFixResultSchema, input.signal);
     if (result.bugKey !== task.bugKey) throw new Error(`Pi fixer returned bugKey ${result.bugKey}, expected ${task.bugKey}`);
     return result;
   }
@@ -354,7 +367,7 @@ export class PiAgentRunner implements AgentRunner {
     const task = BugFixTaskSchema.parse(input.task);
     const profile = EnvironmentProfileSchema.parse(input.profile);
     const validation = DeterministicValidationSchema.parse(input.validation);
-    return this.runRole('reviewer', input.worktreePath, reviewerPrompt({ ...input, task, profile, validation }), StrictReviewResultSchema);
+    return this.runRole('reviewer', input.worktreePath, reviewerPrompt({ ...input, task, profile, validation }), StrictReviewResultSchema, input.signal);
   }
 }
 

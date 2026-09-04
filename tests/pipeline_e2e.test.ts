@@ -225,7 +225,7 @@ environments:
       productArea: 'ui',
       component: 'button',
       bugType: 'functional',
-      executionTarget: 'frontend',
+      executionTarget: 'unknown',
       environmentProfileId: 'frontend-test',
       severity: 'medium',
       actualBehavior: 'Button text misaligned',
@@ -241,6 +241,8 @@ environments:
       intake: { completenessScore: 85, confidence: 1, missingInformation: [], conversationId: conv.id, llmSummary: 'Button alignment' }
     });
 
+    const attachmentId = newId();
+    repo.addAttachment(bug.id, { id: attachmentId, filename: 'screenshot.png', mimeType: 'image/png', size: 3, relativePath: 'attachments/screenshot.png', sha256: 'a'.repeat(64), extractedText: 'button was shifted', analysisStatus: 'completed', analysisResult: 'Visual mismatch' });
     queueBug(repo, bug.bugKey);
     const job = queue.enqueueJob(bug.id, bug.bugKey);
     expect(job).toBeDefined();
@@ -280,6 +282,9 @@ environments:
     const gitResult = JSON.parse(fs.readFileSync(path.join(artifactDir, 'git-result.json'), 'utf8'));
     expect(gitResult.pushed).toBe(false);
     expect(gitResult.error).toBe('DRY_RUN');
+    const fixTask = JSON.parse(fs.readFileSync(path.join(artifactDir, 'fix-task.json'), 'utf8'));
+    expect(fixTask.executionTarget).toBe('frontend');
+    expect(fixTask.attachments.map((item: { id: string }) => item.id)).toContain(attachmentId);
   });
 
   it('runs push-enabled pipeline and reaches READY_FOR_HUMAN_REVIEW', async () => {
