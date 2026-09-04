@@ -22,6 +22,8 @@
 4. `04-environment-queue.md`：Phase 9–10，环境配置/文档/Skill 和 SQLite 单 worker 队列。
 5. `05-execution-pipeline.md`：Phase 11–16，Repo、环境准备、Pi、验证、Review、安全推送。
 6. `06-dashboard-hardening.md`：Phase 17–18，Dashboard、恢复、重试、Dry Run、产物与端到端验收。
+7. `07-conversational-intake-redesign.md`：Conversational-First Intake、可编辑 Markdown 与 revision/hash 对账。
+8. `08-intake-submission-ux.md`：Intake 初始化、提交反馈、成功终态与后续导航闭环。
 
 ## 集成原则
 
@@ -30,4 +32,3 @@
 - 业务层依赖接口，不依赖 HTTP/LLM/Pi SDK 或具体文件路径实现。
 - 所有路径先解析并验证仍位于配置允许的根目录内。
 - 每个模块包含单元测试；API、数据库、队列和流水线包含集成测试。
-

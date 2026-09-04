@@ -1,10 +1,50 @@
-import { describe, expect, it } from 'vitest';
-import { renderIndexHtml } from './index.js';
+import { describe, expect, it, vi } from 'vitest';
+import { renderDashboardHtml, renderDetailHtml, renderIndexHtml } from './index.js';
+const clientElementIds = [
+    'error', 'document-save-state', 'document-sync-state', 'message', 'send', 'markdown-editor',
+    'continue', 'submit', 'reload-server-document', 'state', 'messages', 'score', 'missing',
+    'retry-init', 'success-card', 'bug-key', 'bug-key-link', 'bug-detail-link', 'submitted-status',
+    'submitted-score', 'submitted-explanation',
+];
+function executeIntakeClient(responses) {
+    const elements = new Map();
+    for (const id of clientElementIds) {
+        const element = {
+            textContent: '', hidden: ['retry-init', 'success-card', 'reload-server-document'].includes(id), disabled: false,
+            readOnly: false, value: '', href: '', className: '', innerHTML: '', scrollTop: 0, scrollHeight: 0,
+            listeners: {},
+            addEventListener(type, listener) { this.listeners[type] = listener; },
+            focus() { },
+        };
+        elements.set(id, element);
+    }
+    let responseIndex = 0;
+    const fetchMock = vi.fn(async () => {
+        const value = responses[responseIndex++];
+        if (value instanceof Error)
+            throw value;
+        return { ok: true, status: 200, json: async () => value };
+    });
+    const confirmMock = vi.fn(() => true);
+    const script = renderIndexHtml().match(/<script>([\s\S]*)<\/script>/)?.[1];
+    if (!script)
+        throw new Error('Intake client script is missing');
+    new Function('document', 'fetch', 'confirm', script)({ getElementById: (id) => elements.get(id) }, fetchMock, confirmMock);
+    return { elements, fetchMock, confirmMock };
+}
 describe('conversational intake page', () => {
     it('emits a parseable inline client script', () => {
         const script = renderIndexHtml().match(/<script>([\s\S]*)<\/script>/)?.[1];
         expect(script).toBeDefined();
         expect(() => new Function(script)).not.toThrow();
+    });
+    it('keeps every rendered inline script parseable', () => {
+        for (const html of [renderIndexHtml(), renderDashboardHtml(), renderDetailHtml('BUG-000001')]) {
+            const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+            expect(scripts.length).toBeGreaterThan(0);
+            for (const [, script] of scripts)
+                expect(() => new Function(script)).not.toThrow();
+        }
     });
     it('uses an editable Markdown document instead of a structured draft form', () => {
         const html = renderIndexHtml();
@@ -15,11 +55,11 @@ describe('conversational intake page', () => {
         expect(html).toContain('handleDocumentConflict');
         expect(html).toContain('reload-server-document');
         expect(html).toContain('setEditorDirty');
-        expect(html).toContain('saveTimer=setTimeout');
+        expect(html).toContain('saveTimer = setTimeout');
         expect(html).toContain('await flushDocument()');
-        expect(html).toContain('e.data&&e.data.document');
+        expect(html).toContain('error.data && error.data.document');
         expect(html).toContain('本地编辑已保留');
-        expect(html).toContain("localDirty=$('markdown-editor').value!==content");
+        expect(html).toContain("localDirty = $('markdown-editor').value !== content");
         expect(html).not.toContain('id="title"');
         expect(html).not.toContain('id="target"');
         expect(html).not.toContain('id="profile"');
@@ -27,6 +67,73 @@ describe('conversational intake page', () => {
         expect(html).not.toContain('id="expected"');
         expect(html).not.toContain('id="steps"');
         expect(html).not.toContain('Save draft');
+    });
+    it('renders accessible navigation and a persistent submitted-result shell', () => {
+        const html = renderIndexHtml();
+        expect(html).toContain('href="/dashboard"');
+        expect(html).toContain('>Dashboard</a>');
+        expect(html).toContain('id="success-card"');
+        expect(html).toContain('role="status"');
+        expect(html).toContain('hidden><h2>Bug 已提交</h2>');
+        expect(html).toContain('id="bug-key-link"');
+        expect(html).toContain('id="bug-detail-link"');
+        expect(html).toContain("$('state').textContent = '已提交 ' + (bugKey || 'Bug')");
+        expect(html).toContain('查看 Bug 详情');
+        expect(html).toContain('前往 Dashboard');
+        expect(html).toContain('创建新报告');
+        expect(html).toContain("'/bugs/' + encodeURIComponent(bugKey)");
+    });
+    it('contains retry, pending, failure recovery, and post-submit write guards', () => {
+        const html = renderIndexHtml();
+        expect(html).toContain('id="retry-init"');
+        expect(html).toContain('重试加载');
+        expect(html).toContain("loading: '正在创建会话…'");
+        expect(html).toContain("busy: action === 'submit' ? '正在提交…' : '处理中…'");
+        expect(html).toContain("if (pageState !== 'ready' || !id) return;");
+        expect(html).toContain("if (pageState === 'submitted') return saving || Promise.resolve();");
+        expect(html).toContain("if (pageState === 'submitted' || pageState === 'busy'");
+        expect(html).toContain("if (pageState !== 'submitted') setPageState('ready');");
+        expect(html).toContain('clearTimeout(saveTimer);\n    saveTimer = null;\n    localDirty = false;');
+        expect(html).toContain('当前 pnpm dev 模式没有 repair worker');
+        expect(html).toContain('报告会停留在队列中');
+        expect(html).toContain('报告已创建，但信息仍不充分');
+        expect(html).toContain('body: JSON.stringify({ confirm: true })');
+    });
+    it('enables initialization retry and reaches ready after a transient failure', async () => {
+        const created = { id: 'conversation-1', messages: [], completeness: { score: 0 }, document: { content: '# Bug', revision: 0, syncStatus: 'synced' } };
+        const { elements, fetchMock } = executeIntakeClient([new Error('network unavailable'), created]);
+        await vi.waitFor(() => expect(elements.get('retry-init')?.hidden).toBe(false));
+        expect(elements.get('retry-init')?.disabled).toBe(false);
+        elements.get('retry-init')?.onclick?.();
+        await vi.waitFor(() => expect(elements.get('state')?.textContent).toBe('可继续补充'));
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(elements.get('send')?.disabled).toBe(false);
+    });
+    it('renders submit results and blocks every subsequent conversation write', async () => {
+        const created = { id: 'conversation-1', messages: [], completeness: { score: 80 }, document: { content: '# Bug', revision: 1, syncStatus: 'synced' } };
+        const saved = { content: '# Updated bug', revision: 2, syncStatus: 'dirty' };
+        const submitted = { bugKey: 'BUG-000123', status: 'QUEUED', completeness: { score: 82 }, document: { ...saved, syncStatus: 'synced' } };
+        const { elements, fetchMock } = executeIntakeClient([created, saved, submitted]);
+        await vi.waitFor(() => expect(elements.get('state')?.textContent).toBe('可继续补充'));
+        elements.get('markdown-editor').value = saved.content;
+        elements.get('markdown-editor')?.listeners.input?.();
+        elements.get('submit')?.onclick?.();
+        await vi.waitFor(() => expect(elements.get('state')?.textContent).toBe('已提交 BUG-000123'));
+        expect(elements.get('success-card')?.hidden).toBe(false);
+        expect(elements.get('bug-key')?.textContent).toBe('BUG-000123');
+        expect(elements.get('submitted-status')?.textContent).toBe('QUEUED');
+        expect(elements.get('submitted-score')?.textContent).toBe('82/100');
+        expect(elements.get('bug-key-link')?.href).toBe('/bugs/BUG-000123');
+        expect(elements.get('bug-detail-link')?.href).toBe('/bugs/BUG-000123');
+        expect(elements.get('message')?.disabled).toBe(true);
+        expect(elements.get('markdown-editor')?.readOnly).toBe(true);
+        expect(elements.get('document-sync-state')?.textContent).toBe('synced');
+        elements.get('message').value = 'must not send';
+        elements.get('send')?.onclick?.();
+        elements.get('submit')?.onclick?.();
+        elements.get('markdown-editor')?.listeners.input?.();
+        await Promise.resolve();
+        expect(fetchMock).toHaveBeenCalledTimes(3);
     });
 });
 //# sourceMappingURL=index.test.js.map
