@@ -51,7 +51,14 @@ export interface ResolvedEnvironment {
   /** Compatibility fields consumed by the existing fixer adapter. */
   docsContent: string; skillContent: string;
 }
-export interface EnvironmentResolverOptions { maxFileBytes?: number; env?: Record<string, string | undefined>; }
+export interface EnvironmentResolverOptions {
+  maxFileBytes?: number;
+  env?: Record<string, string | undefined>;
+  /** Permit an installation to start without a checked-in profile catalog. */
+  allowMissingConfig?: boolean;
+  /** Writable catalog for profiles generated from confirmed intake conversations. */
+  profileStorePath?: string;
+}
 const isWithin = (root: string, candidate: string): boolean => candidate === root || candidate.startsWith(`${root}${path.sep}`);
 const environmentVariable = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/u;
 
@@ -60,24 +67,58 @@ export class EnvironmentResolver {
   private readonly maxFileBytes: number;
   private readonly rootDir: string;
   private readonly env: Record<string, string | undefined>;
+  private readonly allowMissingConfig: boolean;
+  private readonly profileStorePath?: string;
   constructor(private readonly configPath: string, rootDir = process.cwd(), options: EnvironmentResolverOptions = {}) {
-    this.rootDir = fs.realpathSync.native(path.resolve(rootDir)); this.maxFileBytes = options.maxFileBytes ?? 256 * 1024; this.env = options.env ?? process.env; this.reload();
+    this.rootDir = fs.realpathSync.native(path.resolve(rootDir)); this.maxFileBytes = options.maxFileBytes ?? 256 * 1024; this.env = options.env ?? process.env;
+    this.allowMissingConfig = options.allowMissingConfig ?? false;
+    this.profileStorePath = options.profileStorePath ? path.resolve(this.rootDir, options.profileStorePath) : undefined;
+    this.reload();
+  }
+  private readCatalog(filename: string, optional = false): EnvironmentProfile[] {
+    if (!fs.existsSync(filename)) {
+      if (optional) return [];
+      throw new EnvironmentBlockedError(`Environment config file not found: ${filename}`);
+    }
+    let parsed: unknown;
+    try { parsed = EnvironmentConfigSchema.parse(yaml.parse(fs.readFileSync(filename, 'utf8'))); }
+    catch (error) { throw new EnvironmentBlockedError('Environment configuration is invalid', error instanceof z.ZodError ? error.issues : undefined); }
+    return (parsed as { environments: EnvironmentProfile[] }).environments;
+  }
+  private resolvePlaceholders(profile: EnvironmentProfile): EnvironmentProfile {
+    const placeholder = profile.repository.match(environmentVariable);
+    if (!placeholder) return profile;
+    const repository = this.env[placeholder[1]]?.trim();
+    if (!repository) throw new EnvironmentBlockedError(`Repository environment variable is not configured: ${placeholder[1]}`, { profileId: profile.id });
+    return EnvironmentProfileSchema.parse({ ...profile, repository, repoUrl: repository });
   }
   public reload(): EnvironmentProfile[] {
-    if (!fs.existsSync(this.configPath)) throw new EnvironmentBlockedError(`Environment config file not found: ${this.configPath}`);
-    let parsed: unknown;
-    try { parsed = EnvironmentConfigSchema.parse(yaml.parse(fs.readFileSync(this.configPath, 'utf8'))); }
-    catch (error) { throw new EnvironmentBlockedError('Environment configuration is invalid', error instanceof z.ZodError ? error.issues : undefined); }
-    const profiles = parsed as { environments: EnvironmentProfile[] }; const ids = new Set<string>();
-    this.profiles = profiles.environments.map((profile) => {
+    const configured = this.readCatalog(this.configPath, this.allowMissingConfig);
+    const generated = this.profileStorePath && this.profileStorePath !== path.resolve(this.configPath)
+      ? this.readCatalog(this.profileStorePath, true) : [];
+    const ids = new Set<string>();
+    this.profiles = [...configured, ...generated].map((profile) => {
       if (ids.has(profile.id)) throw new EnvironmentBlockedError(`Duplicate environment profile id: ${profile.id}`); ids.add(profile.id);
-      const placeholder = profile.repository.match(environmentVariable);
-      if (!placeholder) return profile;
-      const repository = this.env[placeholder[1]]?.trim();
-      if (!repository) throw new EnvironmentBlockedError(`Repository environment variable is not configured: ${placeholder[1]}`, { profileId: profile.id });
-      return EnvironmentProfileSchema.parse({ ...profile, repository, repoUrl: repository });
+      return this.resolvePlaceholders(profile);
     });
     return this.listProfiles();
+  }
+  /** Persist an intake-generated profile atomically, then make it available to the worker. */
+  public upsertGeneratedProfile(profile: z.input<typeof EnvironmentProfileSchema>): EnvironmentProfile {
+    if (!this.profileStorePath) throw new EnvironmentBlockedError('Generated environment profile storage is not configured');
+    const candidate = EnvironmentProfileSchema.parse(profile);
+    const current = this.readCatalog(this.profileStorePath, true);
+    const index = current.findIndex((item) => item.id === candidate.id);
+    if (index >= 0) current[index] = candidate; else current.push(candidate);
+    const content = yaml.stringify({ environments: current });
+    fs.mkdirSync(path.dirname(this.profileStorePath), { recursive: true });
+    const temporary = `${this.profileStorePath}.${process.pid}.${Date.now()}.tmp`;
+    try { fs.writeFileSync(temporary, content, { encoding: 'utf8', mode: 0o600 }); fs.renameSync(temporary, this.profileStorePath); }
+    finally { if (fs.existsSync(temporary)) fs.rmSync(temporary, { force: true }); }
+    this.reload();
+    const saved = this.getProfile(candidate.id);
+    if (!saved) throw new EnvironmentBlockedError(`Generated environment profile "${candidate.id}" could not be reloaded`);
+    return saved;
   }
   public listProfiles(): EnvironmentProfile[] { return this.profiles.map((profile) => ({ ...profile, markdown: [...profile.markdown], skills: [...profile.skills], setupCommands: [...profile.setupCommands], validationCommands: [...profile.validationCommands] })); }
   public getProfile(id: string): EnvironmentProfile | null { return this.profiles.find((profile) => profile.id === id) ?? null; }

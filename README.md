@@ -10,13 +10,13 @@ pnpm test
 pnpm build
 ```
 
-Run `pnpm dev` and open `http://127.0.0.1:8033/`. Without LLM settings this is a safe UI/API-only mode. A real Pi worker additionally requires `PI_SANDBOX_PROFILE`, a name for an externally enforced host/container sandbox; the worker stays disabled when it is absent. Prompt text and `DRY_RUN` are not security boundaries. To listen on all interfaces, use `pnpm dev -- --host`. See [USAGE.md](USAGE.md) for the minimal configuration and safety boundary.
+Run `pnpm dev` and open `http://127.0.0.1:8033/`. Without LLM settings this is a safe UI/API-only mode. `LLM_ENDPOINT_URL` and `LLM_MODEL` enable the real Intake conversation; the Pi repair worker additionally requires `PI_SANDBOX_PROFILE`, a name for an externally enforced host/container sandbox, and stays disabled when it is absent. Prompt text and `DRY_RUN` are not security boundaries. To listen on all interfaces, use `pnpm dev -- --host`. See [USAGE.md](USAGE.md) for the minimal configuration and safety boundary.
 
 `@llmbugfix/bug-domain` contains the V4 Zod contracts and lifecycle state machine. `@llmbugfix/bug-repository` initializes SQLite with WAL, foreign keys, and a five-second busy timeout and exports Drizzle tables and a transactional repository.
 
 ## Local operation and dashboard
 
-Copy `.env.example` to `.env`, keep `DRY_RUN=true` for initial validation, and map each environment profile to an approved local Git repository. `LLM_ENDPOINT_URL` is the single OpenAI-compatible endpoint used by Intake, Pi Fixer, and Pi Reviewer. If it, `LLM_MODEL`, or the external `PI_SANDBOX_PROFILE` is absent, no LLM or repair worker starts. `VISION_HOST` remains disabled unless explicitly integrated.
+Copy `.env.example` to `.env` and keep `DRY_RUN=true` for initial validation. A static environment catalog is optional: when a report names a project that is not already configured, the real Intake asks for an HTTPS or SSH Git clone URL. After the tester explicitly confirms the report, the service clones it into `DATA_ROOT/repositories` and writes a runnable profile to `DATA_ROOT/generated-environments.yaml`; no `E2E_FRONTEND_REPOSITORY`, `FRONTEND_MAIN_REPOSITORY`, or `BACKEND_MAIN_REPOSITORY` setting is required for this flow. `LLM_ENDPOINT_URL` is the single OpenAI-compatible endpoint used by Intake, Pi Fixer, and Pi Reviewer. `LLM_ENDPOINT_URL` and `LLM_MODEL` enable real Intake; the repair worker additionally requires the externally enforced `PI_SANDBOX_PROFILE`. `VISION_HOST` remains disabled unless explicitly integrated.
 
 Start the API with the repository/database dependencies supplied by the embedding application, then serve `renderDashboardHtml()` at `/dashboard` and `renderDetailHtml(id)` at `/bugs/:id`. The dashboard reads `GET /api/bugs` and detail reads `GET /api/bugs/:id`; both expose loading, empty and error states. Liveness is available at `/api/health/live` and readiness at `/api/health/ready` (also `/healthz` and `/readyz`).
 

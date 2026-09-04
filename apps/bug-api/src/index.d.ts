@@ -1,3 +1,4 @@
+import { type EnvironmentProfileProposal } from '@llmbugfix/bug-domain';
 import { type BugDocumentStore, type SQLiteBugRepository, type BugRepository } from '@llmbugfix/bug-repository';
 import { IntakeService } from '@llmbugfix/intake-agent';
 import { createAttachmentRoutes } from './attachment-routes.js';
@@ -20,9 +21,17 @@ export type QueueLike = {
     cancelJob?: (id: string) => QueueJobLike;
     recoverStaleJobs?: (timeoutMs?: number) => QueueJobLike[];
 };
+type ProvisionedEnvironmentProfile = {
+    id: string;
+    target: 'frontend' | 'backend';
+};
 type EnvironmentSource = {
     listProfiles(): unknown[];
     resolveProfile?: (target: string, requestedProfileId?: string) => unknown;
+    /** Creates a local checkout + generated profile after the reporter confirms. */
+    provisionProfile?: (proposal: EnvironmentProfileProposal & {
+        target: 'frontend' | 'backend';
+    }) => Promise<ProvisionedEnvironmentProfile> | ProvisionedEnvironmentProfile;
 };
 export type PageRenderer = (pathname: string) => string | undefined;
 export type ApiDependencies = {

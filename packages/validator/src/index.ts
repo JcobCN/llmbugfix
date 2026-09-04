@@ -89,7 +89,11 @@ export class Validator {
   async runValidation(worktreeDir: string, validationCommands: string[], options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<ValidationResult & { results: ValidationCommandResult[] }> {
     const results: ValidationCommandResult[] = [];
     for (const raw of validationCommands) { const [bin, ...args] = parseCommand(raw); if (!bin) continue; const result = await this.runner.run(bin, args, { cwd: worktreeDir, timeoutMs: options.timeoutMs ?? 120_000, signal: options.signal }); const passed = result.exitCode === 0 && !result.timedOut && !result.aborted; results.push({ command: raw, exitCode: result.exitCode, passed, timedOut: result.timedOut, timeout: result.timedOut, stdout: result.stdout, stderr: result.stderr, output: `${result.stdout}\n${result.stderr}`.trim() }); }
-    const passed = results.every((r) => r.passed); const base = ValidationResultSchema.parse({ passed, commands: validationCommands, results, summary: passed ? 'All validation checks passed.' : 'Validation checks failed.', artifacts: [] });
+    const passed = results.every((r) => r.passed);
+    const summary = results.length === 0
+      ? 'No deterministic validation commands were configured; reviewer assessment is required.'
+      : passed ? 'All validation checks passed.' : 'Validation checks failed.';
+    const base = ValidationResultSchema.parse({ passed, commands: validationCommands, results, summary, artifacts: [] });
     return { ...base, results } as ValidationResult & { results: ValidationCommandResult[] };
   }
 }

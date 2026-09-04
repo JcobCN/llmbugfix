@@ -1,4 +1,11 @@
- # Repository values are supplied by deployment environment variables.
+# Optional static profile catalog. `ENVIRONMENT_CONFIG_PATH` may point here,
+# but the service can start without this file. Profiles created after a
+# confirmed remote-URL intake are stored in `DATA_ROOT/generated-environments.yaml`.
+#
+# When this catalog is used, repository values are supplied by deployment
+# environment variables and must point to local Git checkouts. The dynamic
+# intake flow does not require FRONTEND_MAIN_REPOSITORY or
+# BACKEND_MAIN_REPOSITORY.
 environments:
   - id: frontend-main
     name: Frontend Main Web Application

@@ -51,6 +51,16 @@ describe('Intake Agent & Service', () => {
     expect(result.updatedDraft.environment?.frontend?.browserVersion).toBe('126');
   });
 
+  it('captures a Git remote as a generated environment-profile proposal', async () => {
+    const result = await new IntakeService(new FakeIntakeModel()).processTurn(
+      { executionTarget: 'frontend' }, [],
+      '项目仓库是 https://github.example.test/team/storefront.git，默认 main 分支。',
+    );
+    expect(result.updatedDraft.environmentProfile).toMatchObject({
+      repositoryUrl: 'https://github.example.test/team/storefront.git', name: 'storefront', target: 'frontend',
+    });
+  });
+
   it('allows a latest chat correction to replace an old extracted value', async () => {
     const result = await new IntakeService(new FakeIntakeModel()).processTurn({ executionTarget: 'backend', actualBehavior: '接口返回 500' }, [], '我刚才说错了，实际上是前端页面没有跳转，接口正常返回 200。', ['executionTarget']);
     expect(result.updatedDraft.executionTarget).toBe('frontend');

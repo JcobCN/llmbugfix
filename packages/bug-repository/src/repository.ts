@@ -1,4 +1,4 @@
-import { AgentRunSchema, BugConversationSchema, BugReportSchema, BugStatusSchema, ConversationMessageSchema, CompletenessEvaluationSchema, JobSchema, JobStatusSchema, AttachmentRefSchema, assertValidTransition, type AgentRun, type BugConversation, type BugReport, type ConversationMessage, type Job, type AttachmentRef, type BugStatus, type JobStatus, UserSchema, type User } from '@llmbugfix/bug-domain';
+import { AgentRunSchema, BugConversationSchema, BugReportDraftSchema, BugReportSchema, BugStatusSchema, ConversationMessageSchema, CompletenessEvaluationSchema, JobSchema, JobStatusSchema, AttachmentRefSchema, assertValidTransition, type AgentRun, type BugConversation, type BugReport, type ConversationMessage, type Job, type AttachmentRef, type BugStatus, type JobStatus, UserSchema, type User } from '@llmbugfix/bug-domain';
 import { NotFoundError, newId, now, bugKey } from '@llmbugfix/shared';
 import type { SqliteDatabase } from './database.js';
 
@@ -87,13 +87,13 @@ export class SQLiteBugRepository implements BugRepository {
   }
   getConversation(id: string): BugConversation | null {
     const row = this.database.prepare('SELECT * FROM bug_conversations WHERE id = ?').get(id) as Record<string, unknown> | undefined;
-    return row ? BugConversationSchema.parse({ id: row.id, reporterId: row.reporter_id, status: row.status, draft: parseJson(row.draft, BugReportSchema.deepPartial()), completeness: parseJson(row.completeness, CompletenessEvaluationSchema), createdAt: row.created_at, updatedAt: row.updated_at }) : null;
+    return row ? BugConversationSchema.parse({ id: row.id, reporterId: row.reporter_id, status: row.status, draft: parseJson(row.draft, BugReportDraftSchema), completeness: parseJson(row.completeness, CompletenessEvaluationSchema), createdAt: row.created_at, updatedAt: row.updated_at }) : null;
   }
   updateConversation(id: string, patch: Partial<Pick<BugConversation, 'status' | 'draft' | 'completeness'>>): BugConversation {
     const row = this.database.prepare('SELECT * FROM bug_conversations WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     if (!row) throw new NotFoundError('BugConversation', id);
     const status = patch.status ?? (row.status as BugConversation['status']);
-    const draft = patch.draft ?? parseJson(row.draft, BugReportSchema.deepPartial());
+    const draft = patch.draft ?? parseJson(row.draft, BugReportDraftSchema);
     const completeness = patch.completeness ?? parseJson(row.completeness, CompletenessEvaluationSchema);
     const updatedAt = now();
     this.database.prepare('UPDATE bug_conversations SET status = ?, draft = ?, completeness = ?, updated_at = ? WHERE id = ?').run(status, json(draft), json(completeness), updatedAt, id);

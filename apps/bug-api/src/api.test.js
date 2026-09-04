@@ -82,6 +82,27 @@ describe('Bug API routes', () => {
         expect(submitted.data.code).toBe('ENVIRONMENT_PROFILE_INVALID');
         expect(repo.listBugs()).toHaveLength(0);
     });
+    it('creates a generated profile from a confirmed remote-repository proposal', async () => {
+        const repo = new SQLiteBugRepository(db);
+        const provisioned = [];
+        const dynamicServer = new BugApiServer({}, {
+            repo,
+            intake: new IntakeService(new FakeIntakeModel()),
+            environments: {
+                listProfiles: () => [],
+                provisionProfile: async (proposal) => { provisioned.push(proposal); return { id: 'remote-1234567890abcdef', target: proposal.target }; },
+                resolveProfile: (target, id) => { if (target !== 'frontend' || id !== 'remote-1234567890abcdef')
+                    throw new Error('generated profile not found'); return {}; },
+            },
+        });
+        const created = await dynamicServer.inject({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
+        await dynamicServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${created.data.id}/draft`, body: { draft: { title: 'generated profile', actualBehavior: 'button is stuck', expectedBehavior: 'button works', executionTarget: 'frontend', environmentProfile: { name: 'Storefront', repositoryUrl: 'https://git.example.test/team/storefront.git', target: 'frontend' } } } });
+        const submitted = await dynamicServer.inject({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/submit`, body: { confirm: true } });
+        expect(submitted.status, submitted.raw).toBe(201);
+        expect(submitted.data.bug.environmentProfileId).toBe('remote-1234567890abcdef');
+        expect(submitted.data.bug.executionTarget).toBe('frontend');
+        expect(provisioned).toEqual([expect.objectContaining({ repositoryUrl: 'https://git.example.test/team/storefront.git', target: 'frontend' })]);
+    });
     it('keeps Chat and editable Markdown synchronized through revisioned reconciliation', async () => {
         const created = await server.inject({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
         const id = created.data.id;

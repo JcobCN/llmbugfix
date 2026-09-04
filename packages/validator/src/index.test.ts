@@ -21,6 +21,10 @@ describe('CommandRunner', () => {
     const cwd = dir(); const validator = new Validator(new CommandRunner({ allowedCwdRoots: [cwd] })); const result = await validator.runValidation(cwd, ['/bin/false', '/bin/echo ok']);
     expect(result.passed).toBe(false); expect(result.results).toHaveLength(2); expect(result.results[1]?.stdout.trim()).toBe('ok');
   });
+  it('leaves an unconfigured validation decision to the reviewer', async () => {
+    const cwd = dir(); const validator = new Validator(new CommandRunner({ allowedCwdRoots: [cwd] })); const result = await validator.runValidation(cwd, []);
+    expect(result.passed).toBe(true); expect(result.summary).toContain('reviewer assessment');
+  });
   it('exposes a controlled non-blocking process handle', async () => {
     const cwd = dir(); const runner = new CommandRunner({ allowedCwdRoots: [cwd] });
     const handle = runner.start(process.execPath, ['-e', 'setTimeout(() => {}, 5000)'], { cwd, timeoutMs: 1000 });

@@ -8,6 +8,21 @@ export const BugTypeSchema = z.enum(['functional', 'ui', 'api', 'crash', 'perfor
 export type BugType = z.infer<typeof BugTypeSchema>;
 export const ExecutionTargetSchema = z.enum(['frontend', 'backend', 'unknown']);
 export type ExecutionTarget = z.infer<typeof ExecutionTargetSchema>;
+/**
+ * Facts collected during intake for a project which does not yet have a
+ * checked-in environment profile.  This is intentionally part of the draft
+ * only: the server turns it into a generated, runnable profile after the
+ * reporter confirms submission.
+ */
+export const EnvironmentProfileProposalSchema = z.object({
+  name: z.string().min(1).max(120).optional(),
+  repositoryUrl: z.string().min(1).max(2_048).optional(),
+  defaultBranch: z.string().min(1).max(255).optional(),
+  target: z.enum(['frontend', 'backend']).optional(),
+  setupCommands: z.array(z.string().min(1)).max(20).optional(),
+  validationCommands: z.array(z.string().min(1)).max(20).optional(),
+});
+export type EnvironmentProfileProposal = z.infer<typeof EnvironmentProfileProposalSchema>;
 export const UserSchema = z.object({ id, displayName: z.string().min(1), email: z.string().email().nullable(), createdAt: iso, updatedAt: iso });
 export type User = z.infer<typeof UserSchema>;
 
@@ -55,7 +70,12 @@ export const BugReportSchema = z.object({
   createdAt: iso, updatedAt: iso,
 });
 export type BugReport = z.infer<typeof BugReportSchema>;
-export const BugReportDraftSchema = BugReportSchema.deepPartial();
+// The proposal is conversation state rather than a permanent BugReport field.
+// Keeping it in the draft lets the LLM ask for a Git remote over several turns
+// without turning an arbitrary repository address into executable state early.
+export const BugReportDraftSchema = BugReportSchema.deepPartial().extend({
+  environmentProfile: EnvironmentProfileProposalSchema.optional(),
+});
 export type BugReportDraft = z.infer<typeof BugReportDraftSchema>;
 
 export const MessageRoleSchema = z.enum(['user', 'assistant', 'system']);

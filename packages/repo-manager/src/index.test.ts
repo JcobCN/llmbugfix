@@ -30,4 +30,21 @@ describe('RepoManager', () => {
     expect(fake.calls.some((call) => call.join(' ') === `git worktree remove --force ${path.join(wtRoot, 'BUG-000001')}`)).toBe(true);
     expect(fake.cwds).toContain(fs.realpathSync(repo));
   });
+  it('clones a confirmed Git remote into its dedicated local checkout root', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-clone-')); const clones = path.join(root, 'repositories'); const remote = 'https://git.example.test/team/storefront.git';
+    const calls: string[][] = []; const runner = { async run(command: string, args: string[]): Promise<any> { calls.push([command, ...args]); if (args[0] === 'clone') fs.mkdirSync(path.join(args.at(-1)!, '.git'), { recursive: true }); if (args[0] === 'remote') return { command, args, exitCode: 0, stdout: `${remote}\n`, stderr: '', timedOut: false }; return { command, args, exitCode: 0, stdout: '', stderr: '', timedOut: false }; } };
+    const manager = new RepoManager({ worktreesRoot: path.join(root, 'worktrees'), cloneRoot: clones, commandRunner: runner as any });
+    const cloned = await manager.cloneRemoteRepository(remote, 'remote-1234567890abcdef');
+    expect(fs.existsSync(path.join(cloned, '.git'))).toBe(true);
+    await expect(manager.cloneRemoteRepository(remote, 'remote-1234567890abcdef')).resolves.toBe(cloned);
+    expect(calls.filter((call) => call.includes('clone'))).toHaveLength(1);
+  });
+  it('does not overwrite a completed generated checkout for another remote', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-clone-')); const clones = path.join(root, 'repositories'); const target = path.join(clones, 'remote-1234567890abcdef');
+    fs.mkdirSync(path.join(target, '.git'), { recursive: true });
+    const runner = { async run(command: string, args: string[]): Promise<any> { return { command, args, exitCode: 0, stdout: 'https://git.example.test/other/project.git\n', stderr: '', timedOut: false }; } };
+    const manager = new RepoManager({ worktreesRoot: path.join(root, 'worktrees'), cloneRoot: clones, commandRunner: runner as any });
+    await expect(manager.cloneRemoteRepository('https://git.example.test/team/storefront.git', 'remote-1234567890abcdef')).rejects.toThrow(/different remote/);
+    expect(fs.existsSync(target)).toBe(true);
+  });
 });

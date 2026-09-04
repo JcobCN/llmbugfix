@@ -8,7 +8,7 @@
     "dev": "node scripts/dev.mjs",
     "start": "pnpm build && node apps/bug-api/src/local-server.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "tsc -b --pretty false && vitest run",
     "lint": "eslint packages/*/src",
     "build": "tsc -b --pretty false && node scripts/prepare-local-dist.mjs"
   },

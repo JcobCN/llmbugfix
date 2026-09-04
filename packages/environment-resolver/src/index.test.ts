@@ -25,4 +25,14 @@ describe('EnvironmentResolver', () => {
     const value = fixture(); const text = fs.readFileSync(value.config, 'utf8').replace('target: frontend', 'target: backend'); fs.writeFileSync(value.config, `${text}\n  - id: two\n    name: Two\n    target: frontend\n    repository: "${'${REPO2}'}"\n    markdown: [docs/facts.md]\n    skills: [skills/behavior.md]\n`);
     const resolver = new EnvironmentResolver(value.config, value.root, { env: { REPO: '/repo', REPO2: '/repo2' } }); expect(() => resolver.resolveProfile('mobile')).toThrowError(/BLOCKED|No environment/); expect(() => resolver.resolveProfile('frontend')).not.toThrow(); expect(() => resolver.resolveProfile('frontend', 'none')).toThrowError(/not found/); expect(() => resolver.resolveProfile('backend', 'two')).toThrowError(/does not match target/);
   });
+  it('starts without a static catalog and persists generated profiles separately', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'environment-resolver-generated-'));
+    const generated = path.join(root, 'data', 'generated-environments.yaml');
+    const resolver = new EnvironmentResolver(path.join(root, 'missing-catalog.yaml'), root, { allowMissingConfig: true, profileStorePath: generated });
+    const saved = resolver.upsertGeneratedProfile({ id: 'remote-1234567890abcdef', name: 'Storefront', target: 'frontend', repository: '/data/repositories/storefront', repoUrl: 'https://git.example.test/team/storefront.git', defaultBranch: 'main', markdown: [], skills: [], setupCommands: [], validationCommands: [] });
+    expect(saved.repository).toBe('/data/repositories/storefront');
+    expect(fs.readFileSync(generated, 'utf8')).toContain('remote-1234567890abcdef');
+    const reloaded = new EnvironmentResolver(path.join(root, 'missing-catalog.yaml'), root, { allowMissingConfig: true, profileStorePath: generated });
+    expect(reloaded.resolveProfile('frontend', saved.id).profile.repoUrl).toBe('https://git.example.test/team/storefront.git');
+  });
 });

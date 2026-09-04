@@ -1,6 +1,7 @@
 /** Local bootstrap. With LLM/profile configuration it also runs the repair worker. */
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { AttachmentService } from '@llmbugfix/attachment-service';
 import { openDatabase, SQLiteBugRepository } from '@llmbugfix/bug-repository';
 import { EnvironmentResolver } from '@llmbugfix/environment-resolver';
@@ -65,36 +66,74 @@ const endpointUrl = process.env.LLM_ENDPOINT_URL?.trim();
 const model = process.env.LLM_MODEL?.trim();
 if (Boolean(endpointUrl) !== Boolean(model)) throw new Error('LLM_ENDPOINT_URL and LLM_MODEL must be configured together');
 // Pi's bash tool is not a sandbox. Require an explicit host-level sandbox
-// profile before starting any real intake/fixer worker.
+// profile before starting the real Pi repair worker.
 const sandboxProfile = process.env.PI_SANDBOX_PROFILE?.trim();
-const workerEnabled = Boolean(endpointUrl && model && sandboxProfile);
+const llmEnabled = Boolean(endpointUrl && model);
+const workerEnabled = Boolean(llmEnabled && sandboxProfile);
 let environmentResolver: EnvironmentResolver | undefined;
 let intake: IntakeService | undefined;
 let orchestrator: Orchestrator | undefined;
+let environments: { listProfiles: () => unknown[]; resolveProfile: (target: string, requestedProfileId?: string) => unknown; provisionProfile: (proposal: { name?: string; repositoryUrl?: string; defaultBranch?: string; target: 'frontend' | 'backend'; setupCommands?: string[]; validationCommands?: string[] }) => Promise<{ id: string; target: 'frontend' | 'backend' }> } | undefined;
 
-if (workerEnabled) {
-  environmentResolver = new EnvironmentResolver(process.env.ENVIRONMENT_CONFIG_PATH ?? 'config/environments.yaml', process.cwd(), { env: process.env });
+// Real intake is useful on its own: it can interview the tester and create a
+// local checkout/profile while the actual Pi repair worker remains fail-closed
+// until the host declares an external sandbox.
+if (llmEnabled) {
+  // A checked-in catalog remains supported when explicitly configured, but is
+  // no longer required. Confirmed intake conversations are persisted here.
+  const generatedProfilesPath = path.resolve(config.DATA_ROOT, 'generated-environments.yaml');
+  const configuredCatalog = process.env.ENVIRONMENT_CONFIG_PATH?.trim() || path.resolve(config.DATA_ROOT, 'environment-catalog.yaml');
+  environmentResolver = new EnvironmentResolver(configuredCatalog, process.cwd(), { env: process.env, allowMissingConfig: true, profileStorePath: generatedProfilesPath });
   const profiles = environmentResolver.listProfiles();
   const intakeRequirements = loadIntakeInstructions(process.env.INTAKE_CONFIG_PATH ?? 'config/bug-intake.md');
   const allowedProjects = profiles.map(({ id, name, target }) => ({ id, name, target }));
-  const instructions = `${intakeRequirements}\n\nAllowed project/module profiles (use the exact id as environmentProfileId):\n${JSON.stringify(allowedProjects, null, 2)}`;
+  const instructions = `${intakeRequirements}\n\nExisting project profiles (when applicable, use the exact id as environmentProfileId):\n${JSON.stringify(allowedProjects, null, 2)}\n\nFor a project not shown here, ask the tester for its remote Git clone address. Return the remote in environmentProfile.repositoryUrl so the server can clone it locally and generate the runnable profile after confirmation.`;
   const llmOptions = { baseUrl: endpointUrl!, model: model!, ...(process.env.LLM_API_KEY?.trim() ? { apiKey: process.env.LLM_API_KEY.trim() } : {}), intakeInstructions: instructions };
   intake = new IntakeService(new OpenAICompatibleIntakeModel(llmOptions), new OpenAICompatibleDocumentReconciler(llmOptions));
 
   const worktreesRoot = path.resolve(config.DATA_ROOT, 'worktrees');
+  const repositoriesRoot = path.resolve(config.DATA_ROOT, 'repositories');
   const repositories = profiles.map((profile) => profile.repository);
-  const repoManager = new RepoManager({ worktreesRoot, repositoryRoots: repositories });
+  const repoManager = new RepoManager({ worktreesRoot, repositoryRoots: repositories, cloneRoot: repositoriesRoot });
   for (const repository of repositories) repoManager.validateRepoUrl(repository);
-  const commandRunner = new CommandRunner({ allowedCwdRoots: [worktreesRoot] });
-  const environmentRunner = new EnvironmentRunner({ commandRunner, commandTimeoutMs: positiveInteger(process.env.ENVIRONMENT_TIMEOUT_MS, 600_000, 'ENVIRONMENT_TIMEOUT_MS') });
-  const agentRunner = new PiAgentRunner({
-    endpointUrl: endpointUrl!, model: model!, apiKey: process.env.LLM_API_KEY?.trim() || undefined,
-    fixerTimeoutMs: positiveInteger(process.env.FIXER_TIMEOUT_MS, 2_700_000, 'FIXER_TIMEOUT_MS'),
-    reviewerTimeoutMs: positiveInteger(process.env.REVIEWER_TIMEOUT_MS, 900_000, 'REVIEWER_TIMEOUT_MS'),
-    requireSandbox: true,
-    sandboxProfile,
-  });
-  orchestrator = new Orchestrator(config, repo, queue, environmentResolver, repoManager, environmentRunner, agentRunner, new Validator(commandRunner), { dryRun: process.env.DRY_RUN !== 'false' });
+  const validBranch = (value: string): boolean => /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/u.test(value) && !value.includes('..') && !value.includes('//') && !value.endsWith('/');
+  environments = {
+    listProfiles: () => environmentResolver!.listProfiles(),
+    resolveProfile: (target, profileId) => environmentResolver!.resolveProfile(target, profileId),
+    provisionProfile: async (proposal) => {
+      const repositoryUrl = proposal.repositoryUrl?.trim();
+      if (!repositoryUrl) throw new Error('Git repository remote address is required');
+      const defaultBranch = proposal.defaultBranch?.trim() || 'main';
+      if (!validBranch(defaultBranch)) throw new Error(`Invalid default branch: ${defaultBranch}`);
+      const id = `remote-${createHash('sha256').update(`${proposal.target}\0${repositoryUrl}`).digest('hex').slice(0, 16)}`;
+      const checkout = await repoManager.cloneRemoteRepository(repositoryUrl, id);
+      const leaf = repositoryUrl.replace(/\/+$/u, '').split(/[/:]/u).at(-1)?.replace(/\.git$/iu, '') || 'Remote Git project';
+      const profile = environmentResolver!.upsertGeneratedProfile({
+        id,
+        name: proposal.name?.trim() || leaf,
+        target: proposal.target,
+        repository: checkout,
+        repoUrl: repositoryUrl,
+        defaultBranch,
+        baseBranch: defaultBranch,
+        markdown: [], skills: [], documentationPaths: [], skillPaths: [],
+        setupCommands: proposal.setupCommands ?? [], validationCommands: proposal.validationCommands ?? [], setup: [], validation: [], instructions: [],
+      });
+      return { id: profile.id, target: profile.target };
+    },
+  };
+  if (workerEnabled) {
+    const commandRunner = new CommandRunner({ allowedCwdRoots: [worktreesRoot] });
+    const environmentRunner = new EnvironmentRunner({ commandRunner, commandTimeoutMs: positiveInteger(process.env.ENVIRONMENT_TIMEOUT_MS, 600_000, 'ENVIRONMENT_TIMEOUT_MS') });
+    const agentRunner = new PiAgentRunner({
+      endpointUrl: endpointUrl!, model: model!, apiKey: process.env.LLM_API_KEY?.trim() || undefined,
+      fixerTimeoutMs: positiveInteger(process.env.FIXER_TIMEOUT_MS, 2_700_000, 'FIXER_TIMEOUT_MS'),
+      reviewerTimeoutMs: positiveInteger(process.env.REVIEWER_TIMEOUT_MS, 900_000, 'REVIEWER_TIMEOUT_MS'),
+      requireSandbox: true,
+      sandboxProfile,
+    });
+    orchestrator = new Orchestrator(config, repo, queue, environmentResolver, repoManager, environmentRunner, agentRunner, new Validator(commandRunner), { dryRun: process.env.DRY_RUN !== 'false' });
+  }
 }
 const pageRenderer = (pathname: string): string | undefined => {
   if (pathname === '/') return renderIndexHtml();
@@ -102,13 +141,13 @@ const pageRenderer = (pathname: string): string | undefined => {
   const detail = pathname.match(/^\/bugs\/([^/]+)$/u);
   return detail ? renderDetailHtml(decodeURIComponent(detail[1])) : undefined;
 };
-const api = new BugApiServer({ ...process.env, ...config, DRY_RUN: process.env.DRY_RUN ?? true }, { repo, intake, queue, attachments, environments: environmentResolver, pageRenderer });
+const api = new BugApiServer({ ...process.env, ...config, DRY_RUN: process.env.DRY_RUN ?? true }, { repo, intake, queue, attachments, environments: environments ?? environmentResolver, pageRenderer });
 const host = process.env.BUGFIX_LISTEN_HOST ?? '127.0.0.1';
 const port = await api.listen(portFromEnv(process.env.PORT), host);
 orchestrator?.start();
 console.log(`LLM Bugfix local verification server is ready at http://${host}:${port}`);
-console.log(workerEnabled ? `Real Intake and Pi repair worker are enabled with model ${model}.` : endpointUrl && model ? 'LLM and repair worker are disabled; submitted reports stay in the local queue. Configure PI_SANDBOX_PROFILE to enable the externally isolated worker.' : 'LLM and repair worker are disabled; submitted reports stay in the local queue. Configure LLM_ENDPOINT_URL and LLM_MODEL to enable them.');
-if (endpointUrl && model && !sandboxProfile) console.warn('WARNING: real repair worker disabled; set PI_SANDBOX_PROFILE to an externally enforced sandbox profile before enabling Pi bash.');
+console.log(workerEnabled ? `Real Intake and Pi repair worker are enabled with model ${model}.` : llmEnabled ? `Real Intake is enabled with model ${model}; submitted reports stay in the local queue until PI_SANDBOX_PROFILE enables the externally isolated Pi worker.` : 'LLM and repair worker are disabled; submitted reports stay in the local queue. Configure LLM_ENDPOINT_URL and LLM_MODEL to enable Intake.');
+if (llmEnabled && !sandboxProfile) console.warn('WARNING: real Pi repair worker disabled; set PI_SANDBOX_PROFILE to an externally enforced sandbox profile before enabling Pi bash.');
 
 let closing = false;
 const shutdown = async (signal: string): Promise<void> => {

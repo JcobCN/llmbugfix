@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { URL } from 'node:url';
 import { newId, now } from '@llmbugfix/shared';
-import { BugReportSchema, type BugReportDraft, type BugConversation } from '@llmbugfix/bug-domain';
+import { BugReportSchema, type BugReportDraft, type BugConversation, type EnvironmentProfileProposal } from '@llmbugfix/bug-domain';
 import { DocumentPathError, DocumentRevisionConflictError, SQLiteBugDocumentStore, type BugDocumentStore, type DocumentSnapshot as StoredDocumentSnapshot, type SQLiteBugRepository, type BugRepository } from '@llmbugfix/bug-repository';
 import { IntakeService, applyDocumentReconciliation, mergeBugDocument, mergeDraft } from '@llmbugfix/intake-agent';
 import { evaluateCompleteness } from '@llmbugfix/intake-policy';
@@ -19,7 +19,13 @@ export type QueueLike = {
   cancelJob?: (id: string) => QueueJobLike;
   recoverStaleJobs?: (timeoutMs?: number) => QueueJobLike[];
 };
-type EnvironmentSource = { listProfiles(): unknown[]; resolveProfile?: (target: string, requestedProfileId?: string) => unknown };
+type ProvisionedEnvironmentProfile = { id: string; target: 'frontend' | 'backend' };
+type EnvironmentSource = {
+  listProfiles(): unknown[];
+  resolveProfile?: (target: string, requestedProfileId?: string) => unknown;
+  /** Creates a local checkout + generated profile after the reporter confirms. */
+  provisionProfile?: (proposal: EnvironmentProfileProposal & { target: 'frontend' | 'backend' }) => Promise<ProvisionedEnvironmentProfile> | ProvisionedEnvironmentProfile;
+};
 export type PageRenderer = (pathname: string) => string | undefined;
 export type ApiDependencies = { repo: BugRepository; intake?: IntakeService; queue?: QueueLike; environments?: EnvironmentSource; attachments?: Parameters<typeof createAttachmentRoutes>[0]['attachments']; pageRenderer?: PageRenderer; documentStore?: BugDocumentStore };
 export type InjectRequest = { method?: string; url: string; headers?: Record<string, string>; body?: unknown };
@@ -268,9 +274,20 @@ export class BugApiServer {
         try { document = await this.persistGeneratedDocument(conversation.id, document, mergeBugDocument(document.content, draft, completenessForDocument)); } catch (error) { if (error instanceof DocumentRevisionConflictError) { send(response, 409, { error: error.code, code: error.code, document: error.snapshot }); return; } throw error; }
       }
     }
+    if (this.environments?.provisionProfile && draft.environmentProfile?.repositoryUrl) {
+      const target = draft.executionTarget === 'frontend' || draft.executionTarget === 'backend'
+        ? draft.executionTarget : draft.environmentProfile.target;
+      if (target !== 'frontend' && target !== 'backend') { send(response, 422, { error: '请先确认问题属于前端还是后端，再创建项目运行配置', code: 'ENVIRONMENT_TARGET_REQUIRED' }); return; }
+      try {
+        const profile = await this.environments.provisionProfile({ ...draft.environmentProfile, target });
+        draft = mergeDraft(draft, { executionTarget: profile.target, environmentProfileId: profile.id });
+      } catch (error) {
+        send(response, 422, { error: error instanceof Error ? error.message : String(error), code: 'REPOSITORY_CLONE_FAILED' }); return;
+      }
+    }
     const completeness = evaluateCompleteness(draft); const user = this.repo.getUser(conversation.reporterId); if (!user) { send(response, 500, { error: 'Reporter not found' }); return; }
     if (this.environments?.resolveProfile) {
-      if (!draft.environmentProfileId) { send(response, 422, { error: '请选择系统提供的项目或模块后再提交', code: 'ENVIRONMENT_PROFILE_REQUIRED', environments: this.environments.listProfiles() }); return; }
+      if (!draft.environmentProfileId) { send(response, 422, { error: '请提供项目的 Git 仓库远程地址，或选择已有项目配置后再提交', code: 'ENVIRONMENT_PROFILE_REQUIRED', environments: this.environments.listProfiles() }); return; }
       try { this.environments.resolveProfile(draft.executionTarget ?? 'unknown', draft.environmentProfileId); }
       catch (error) { send(response, 422, { error: error instanceof Error ? error.message : String(error), code: 'ENVIRONMENT_PROFILE_INVALID', environments: this.environments.listProfiles() }); return; }
     }
