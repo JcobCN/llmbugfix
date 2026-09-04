@@ -19,7 +19,7 @@ export type QueueLike = {
   cancelJob?: (id: string) => QueueJobLike;
   recoverStaleJobs?: (timeoutMs?: number) => QueueJobLike[];
 };
-type EnvironmentSource = { listProfiles(): unknown[] };
+type EnvironmentSource = { listProfiles(): unknown[]; resolveProfile?: (target: string, requestedProfileId?: string) => unknown };
 export type PageRenderer = (pathname: string) => string | undefined;
 export type ApiDependencies = { repo: BugRepository; intake?: IntakeService; queue?: QueueLike; environments?: EnvironmentSource; attachments?: Parameters<typeof createAttachmentRoutes>[0]['attachments']; pageRenderer?: PageRenderer; documentStore?: BugDocumentStore };
 export type InjectRequest = { method?: string; url: string; headers?: Record<string, string>; body?: unknown };
@@ -269,6 +269,11 @@ export class BugApiServer {
       }
     }
     const completeness = evaluateCompleteness(draft); const user = this.repo.getUser(conversation.reporterId); if (!user) { send(response, 500, { error: 'Reporter not found' }); return; }
+    if (this.environments?.resolveProfile) {
+      if (!draft.environmentProfileId) { send(response, 422, { error: '请选择系统提供的项目或模块后再提交', code: 'ENVIRONMENT_PROFILE_REQUIRED', environments: this.environments.listProfiles() }); return; }
+      try { this.environments.resolveProfile(draft.executionTarget ?? 'unknown', draft.environmentProfileId); }
+      catch (error) { send(response, 422, { error: error instanceof Error ? error.message : String(error), code: 'ENVIRONMENT_PROFILE_INVALID', environments: this.environments.listProfiles() }); return; }
+    }
     const environment = { environmentName: draft.environment?.environmentName ?? null, appVersion: draft.environment?.appVersion ?? null, buildNumber: draft.environment?.buildNumber ?? null, commitSha: draft.environment?.commitSha ?? null, ...(draft.environment?.frontend ? { frontend: { route: draft.environment.frontend.route ?? null, browser: draft.environment.frontend.browser ?? null, browserVersion: draft.environment.frontend.browserVersion ?? null, os: draft.environment.frontend.os ?? null, resolution: draft.environment.frontend.resolution ?? null } } : {}), ...(draft.environment?.backend ? { backend: { service: draft.environment.backend.service ?? null, endpoint: draft.environment.backend.endpoint ?? null, method: draft.environment.backend.method ?? null, statusCode: draft.environment.backend.statusCode ?? null } } : {}), additionalInfo: draft.environment?.additionalInfo ?? {} };
     const evidence = { errorMessages: draft.evidence?.errorMessages ?? [], stackTraces: draft.evidence?.stackTraces ?? [], logs: draft.evidence?.logs ?? [], screenshots: draft.evidence?.screenshots ?? [], videos: draft.evidence?.videos ?? [], networkTraces: draft.evidence?.networkTraces ?? [], jsonFiles: draft.evidence?.jsonFiles ?? [], otherFiles: draft.evidence?.otherFiles ?? [] };
     const impact = { affectedUsers: draft.impact?.affectedUsers ?? null, scope: draft.impact?.scope ?? 'unknown', blocksTesting: draft.impact?.blocksTesting ?? null, workaroundExists: draft.impact?.workaroundExists ?? null, workaround: draft.impact?.workaround ?? null };

@@ -24,6 +24,7 @@
 6. `06-dashboard-hardening.md`：Phase 17–18，Dashboard、恢复、重试、Dry Run、产物与端到端验收。
 7. `07-conversational-intake-redesign.md`：Conversational-First Intake、可编辑 Markdown 与 revision/hash 对账。
 8. `08-intake-submission-ux.md`：Intake 初始化、提交反馈、成功终态与后续导航闭环。
+9. `09-real-llm-pi-worker.md`：真实 OpenAI-compatible LLM、Pi Coding Agent Adapter、项目/模块到批准仓库映射和本地 repair worker 闭环。
 
 ## 集成原则
 

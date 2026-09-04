@@ -16,6 +16,7 @@ export class Orchestrator {
     validator;
     timer;
     isRunning = false;
+    activeJobs = new Set();
     options;
     constructor(config, repo, queue, envResolver, repoManager, envRunner, agentRunner = new FakePiRunner(), validator = new Validator(), options = {}) {
         this.config = config;
@@ -29,12 +30,18 @@ export class Orchestrator {
         this.options = { dryRun: options.dryRun ?? Boolean(process.env.DRY_RUN === 'true'), workerId: options.workerId ?? `worker-${process.pid}`, artifactRoot: options.artifactRoot ?? path.join(config.DATA_ROOT, 'agent-results') };
     }
     start(pollIntervalMs = 2_000) { this.isRunning = true; this.timer = setInterval(() => { void this.tick(); }, pollIntervalMs); }
-    stop() { this.isRunning = false; if (this.timer)
-        clearInterval(this.timer); }
+    async stop() { this.isRunning = false; if (this.timer)
+        clearInterval(this.timer); this.timer = undefined; await Promise.allSettled([...this.activeJobs]); }
+    async track(operation) { this.activeJobs.add(operation); try {
+        await operation;
+    }
+    finally {
+        this.activeJobs.delete(operation);
+    } }
     async tick() { if (!this.isRunning && this.timer)
         return false; this.queue.recoverStaleJobs(); const job = this.queue.claimNextJob(this.options.workerId); if (!job)
-        return false; await this.processJob(job.id, job.bugId, this.options.workerId); return true; }
-    async runJob(job) { await this.processJob(job.id, job.bugId, job.workerId ?? this.options.workerId); }
+        return false; await this.track(this.processJob(job.id, job.bugId, this.options.workerId)); return true; }
+    async runJob(job) { await this.track(this.processJob(job.id, job.bugId, job.workerId ?? this.options.workerId)); }
     writeArtifact(dir, filename, value) { fs.writeFileSync(path.join(dir, filename), `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 }); }
     writeRawArtifact(dir, filename, value) { fs.writeFileSync(path.join(dir, filename), value, { mode: 0o600 }); }
     async transition(bug, status, payload = {}) { this.repo.changeBugStatus(bug.bugKey, status, 'pipeline', payload); }
@@ -45,6 +52,15 @@ export class Orchestrator {
             this.queue.failJob(jobId, `Bug report not found: ${bugId}`, workerId);
             return;
         }
+        const heartbeatTimer = setInterval(() => { try {
+            const job = this.queue.getJob(jobId);
+            if (job.status === 'RUNNING' && job.workerId === workerId)
+                this.queue.heartbeat(jobId, workerId);
+        }
+        catch (error) {
+            logger.warn({ bugKey: bug.bugKey, error: error instanceof Error ? error.message : String(error) }, 'Job heartbeat failed');
+        } }, 15_000);
+        heartbeatTimer.unref();
         const artifactDir = path.join(this.options.artifactRoot, bug.bugKey);
         fs.mkdirSync(artifactDir, { recursive: true });
         const pipeline = { bugKey: bug.bugKey, status: 'RUNNING', startedAt: now() };
@@ -136,6 +152,7 @@ export class Orchestrator {
             pipeline.error = message;
         }
         finally {
+            clearInterval(heartbeatTimer);
             if (worktreePath && environmentStarted && profile) {
                 try {
                     const stop = await this.envRunner.stopEnvironment(worktreePath, profile);

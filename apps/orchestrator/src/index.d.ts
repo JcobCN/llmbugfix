@@ -29,10 +29,12 @@ export declare class Orchestrator {
     private readonly validator;
     private timer?;
     private isRunning;
+    private readonly activeJobs;
     private readonly options;
     constructor(config: AppConfig, repo: SQLiteBugRepository, queue: JobQueue, envResolver: EnvironmentResolver, repoManager: RepoManager, envRunner: EnvironmentRunner, agentRunner?: AgentRunner, validator?: Validator, options?: OrchestratorOptions);
     start(pollIntervalMs?: number): void;
-    stop(): void;
+    stop(): Promise<void>;
+    private track;
     tick(): Promise<boolean>;
     runJob(job: QueueJob): Promise<void>;
     private writeArtifact;

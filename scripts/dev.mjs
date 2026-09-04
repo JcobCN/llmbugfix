@@ -46,7 +46,7 @@ const watcher = await context({
   format: 'esm',
   target: 'node20',
   sourcemap: true,
-  external: ['better-sqlite3', 'drizzle-orm', 'pino', 'yaml', 'zod'],
+  external: ['@earendil-works/pi-coding-agent', 'better-sqlite3', 'drizzle-orm', 'pino', 'yaml', 'zod'],
   plugins: [{
     name: 'restart-local-server',
     setup(build) {

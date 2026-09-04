@@ -213,7 +213,7 @@ const intakeClientScript = String.raw`(() => {
     $('submitted-status').textContent = status;
     $('submitted-score').textContent = String(score) + '/100';
     if (status === 'QUEUED') {
-      $('submitted-explanation').textContent = '已进入本地修复队列。当前 pnpm dev 模式没有 repair worker，报告会停留在队列中；请在详情页查看。';
+      $('submitted-explanation').textContent = '已进入修复队列。若当前服务已配置 repair worker，它会自动开始处理；请在详情页查看实时状态和修复结果。';
     } else if (status === 'NEEDS_INFO') {
       $('submitted-explanation').textContent = '报告已创建，但信息仍不充分；请查看 Bug 详情了解还需要补充的内容。';
     } else {

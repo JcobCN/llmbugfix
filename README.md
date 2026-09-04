@@ -10,13 +10,13 @@ pnpm test
 pnpm build
 ```
 
-For a safe local UI/API check (SQLite, attachments and queue only; no external service or repair worker), run `pnpm dev` and open `http://127.0.0.1:8033/`. To listen on all interfaces, use `pnpm dev -- --host`. This is an esbuild watch workflow; use `pnpm typecheck` separately for full TypeScript checking. See [USAGE.md](USAGE.md) for details.
+Run `pnpm dev` and open `http://127.0.0.1:8033/`. Without LLM settings this is a safe UI/API-only mode. With `LLM_ENDPOINT_URL`, `LLM_MODEL`, the Intake Markdown, and approved repository profile variables configured, the same command also starts the real Intake model and Pi repair worker. To listen on all interfaces, use `pnpm dev -- --host`. See [USAGE.md](USAGE.md) for the minimal configuration and safety boundary.
 
 `@llmbugfix/bug-domain` contains the V4 Zod contracts and lifecycle state machine. `@llmbugfix/bug-repository` initializes SQLite with WAL, foreign keys, and a five-second busy timeout and exports Drizzle tables and a transactional repository.
 
-## Offline operation and dashboard
+## Local operation and dashboard
 
-The API and worker are designed to run without network services. Copy `.env.example` to an environment file, keep `DRY_RUN=true` for local validation, and use a local Git repository when testing a gated push. `LLM_HOST` and `VISION_HOST` default to disabled adapters; no request is sent to those hosts unless an adapter is explicitly configured. `GIT_ALLOWED_HOSTS` is an allow-list and should contain only local or approved internal hosts.
+Copy `.env.example` to `.env`, keep `DRY_RUN=true` for initial validation, and map each environment profile to an approved local Git repository. `LLM_ENDPOINT_URL` is the single OpenAI-compatible endpoint used by Intake, Pi Fixer, and Pi Reviewer. If it and `LLM_MODEL` are absent, no LLM or repair worker starts. `VISION_HOST` remains disabled unless explicitly integrated.
 
 Start the API with the repository/database dependencies supplied by the embedding application, then serve `renderDashboardHtml()` at `/dashboard` and `renderDetailHtml(id)` at `/bugs/:id`. The dashboard reads `GET /api/bugs` and detail reads `GET /api/bugs/:id`; both expose loading, empty and error states. Liveness is available at `/api/health/live` and readiness at `/api/health/ready` (also `/healthz` and `/readyz`).
 

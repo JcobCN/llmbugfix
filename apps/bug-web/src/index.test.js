@@ -94,8 +94,8 @@ describe('conversational intake page', () => {
         expect(html).toContain("if (pageState === 'submitted' || pageState === 'busy'");
         expect(html).toContain("if (pageState !== 'submitted') setPageState('ready');");
         expect(html).toContain('clearTimeout(saveTimer);\n    saveTimer = null;\n    localDirty = false;');
-        expect(html).toContain('当前 pnpm dev 模式没有 repair worker');
-        expect(html).toContain('报告会停留在队列中');
+        expect(html).toContain('若当前服务已配置 repair worker');
+        expect(html).toContain('查看实时状态和修复结果');
         expect(html).toContain('报告已创建，但信息仍不充分');
         expect(html).toContain('body: JSON.stringify({ confirm: true })');
     });

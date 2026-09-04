@@ -52,6 +52,24 @@ describe('Bug API routes', () => {
         expect(cancelled.data.semantic).toBe('removed_from_queue');
         expect((await server.inject({ method: 'POST', url: `/api/bugs/${submitted.data.bugKey}/retry` })).status).toBe(409);
     });
+    it('rejects an unapproved project/profile before creating an executable bug', async () => {
+        const repo = new SQLiteBugRepository(db);
+        const protectedServer = new BugApiServer({}, {
+            repo,
+            intake: new IntakeService(new FakeIntakeModel()),
+            environments: {
+                listProfiles: () => [{ id: 'frontend-main', name: 'Frontend', target: 'frontend' }],
+                resolveProfile: (_target, profileId) => { if (profileId !== 'frontend-main')
+                    throw new Error('profile is not approved'); return {}; },
+            },
+        });
+        const created = await protectedServer.inject({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
+        await protectedServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${created.data.id}/draft`, body: { draft: { title: 'bad mapping', actualBehavior: 'broken', executionTarget: 'frontend', environmentProfileId: '/tmp/reporter-path' } } });
+        const submitted = await protectedServer.inject({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/submit`, body: { confirm: true } });
+        expect(submitted.status).toBe(422);
+        expect(submitted.data.code).toBe('ENVIRONMENT_PROFILE_INVALID');
+        expect(repo.listBugs()).toHaveLength(0);
+    });
     it('keeps Chat and editable Markdown synchronized through revisioned reconciliation', async () => {
         const created = await server.inject({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
         const id = created.data.id;

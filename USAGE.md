@@ -10,7 +10,7 @@
 
 - 数据库是本地 SQLite（WAL、外键和 5 秒 busy timeout），附件和 Agent 产物写入本地文件系统。
 - 默认 `DRY_RUN=true`，会执行到审查和 `FIX_READY`，不会提交或推送 Git。
-- 真实 Pi/LLM 通过 `PiSdk`/`AgentRunner` 注入；默认编排器使用 `FakePiRunner`。仓库没有验证真实内部模型凭据。
+- 真实 Pi 由 `@earendil-works/pi-coding-agent` 驱动；`AgentRunner` 仍是编排边界，`FakePiRunner` 仅用于离线测试。
 - 图片识别默认是禁用适配器；内部视觉服务必须显式注入，并且只能使用私有网络地址。
 - 没有 GitLab API、Merge Request、自动合并、自动部署或生产环境访问能力。
 - 非 dry-run 模式只允许推送 `ai/*` 分支，并要求 `origin` 主机在 allow-list 中；推送也不会创建 MR 或合并。
@@ -20,7 +20,7 @@
 
 建议使用以下版本：
 
-- Node.js >= 20（推荐 22）
+- Node.js >= 22.19（Pi SDK 的最低要求）
 - pnpm >= 9
 - Git >= 2.30（只有编排和需要本地仓库时才必需）
 
@@ -53,12 +53,17 @@ cp .env.example .env
 | `REVIEWER_TIMEOUT_MS` | `900000` | 宿主/Agent 适配器使用的审查器超时，15 分钟 |
 | `ENVIRONMENT_TIMEOUT_MS` | `600000` | 宿主传给环境执行器的命令超时，10 分钟 |
 | `PIPELINE_TIMEOUT_MS` | `5400000` | 流程总超时，90 分钟（由宿主负责传递/监管） |
+| `LLM_ENDPOINT_URL` | 空 | OpenAI-compatible base URL；与 `LLM_MODEL` 同时配置后启用真实 Intake 和 Pi worker |
+| `LLM_MODEL` | 空 | endpoint 提供的模型 id |
+| `LLM_API_KEY` | 空 | 可选 endpoint credential；不得写入 prompt、日志或产物 |
+| `INTAKE_CONFIG_PATH` | `config/bug-intake.md` | 测试人员必须提供的信息和追问规则 |
+| `ENVIRONMENT_CONFIG_PATH` | `config/environments.yaml` | 项目/模块到受批准 repository/profile 的映射 |
 | `LLM_HOST` | `disabled://local` | 宿主构造 Intake LLM 适配器时使用的内部地址；禁用值不会发请求 |
 | `VISION_HOST` | `disabled://local` | 宿主构造视觉适配器时使用的内部地址；禁用值不会发请求 |
 | `GIT_HOST` | `localhost` | Git 目标标识；非禁用主机必须通过 allow-list |
 | `GIT_ALLOWED_HOSTS` | `localhost` | 逗号分隔的 Git 主机白名单 |
 
-`packages/shared` 的 `parseConfig()` 当前只解析 `DATABASE_PATH`、`LOG_LEVEL`、`DATA_ROOT` 和 `MAX_ATTACHMENT_BYTES`；其余变量由 API/编排宿主读取并传给相应构造函数，当前仓库不会自动把 `.env` 接线到所有适配器。不要把密码、Token、Cookie、API key 或私钥写入 `.env` 以外的 Bug 描述、附件、Profile、日志和产物。
+`packages/shared` 的 `parseConfig()` 解析基础存储配置；`pnpm dev` 的 bootstrap 读取其余变量并接线真实 Adapter。不要把密码、Token、Cookie、API key 或私钥写入 `.env` 以外的 Bug 描述、附件、Profile、日志和产物。
 
 ### 环境 Profile 配置
 
@@ -68,7 +73,7 @@ cp .env.example .env
 repository: "${FRONTEND_MAIN_REPOSITORY}"
 ```
 
-只是 YAML 字符串，不会由当前代码自动进行环境变量插值。启动前必须把它替换为实际存在的本地 Git checkout 路径（例如 `/srv/repos/frontend`），并确保该路径在 `RepoManager` 的 repository roots allow-list 内。Profile 至少需要 `id`、`name`、`target`（`frontend`/`backend`）和 `repository`；`defaultBranch` 默认是 `main`。
+会从服务进程环境变量读取。比如在 `.env` 中设置 `FRONTEND_MAIN_REPOSITORY=/srv/repos/frontend`。变量缺失、目录不存在、不是 Git repository 或不在批准 roots 内时，真实 worker 模式会启动失败。测试人员只选择 Profile 的 id/name，不提交 filesystem path。Profile 至少需要 `id`、`name`、`target`（`frontend`/`backend`）和 `repository`；`defaultBranch` 默认是 `main`。
 
 ## 4. 安装后的构建与校验
 
@@ -93,7 +98,7 @@ pnpm -r build
 
 ## 5. 启动和部署方式
 
-### 5.1 快速本地验证（推荐）
+### 5.1 启动 UI/API-only 模式
 
 仓库提供了一个仅用于本地验证的启动入口。它会启用 SQLite、附件、本地单任务队列和三个页面，但不会启动修复 Worker，也不会调用 LLM、视觉服务、Git 或网络服务。这样可以安全验证“创建会话 → 编辑/提交 Bug → Dashboard 查看队列”的完整 UI/API 流程。
 
@@ -107,50 +112,28 @@ pnpm dev
 
 `pnpm dev` 使用 esbuild 打包并监听 TypeScript 源码；每次成功重建会自动重启本地 Node 服务，通常不需要等待完整 TypeScript 编译。它只负责快速转换，不做完整类型检查；提交前仍应运行 `pnpm typecheck`、`pnpm test` 和 `pnpm build`。`pnpm start` 保持为完整 `tsc` 构建后启动的验证命令，适合一次性手工验证。每次启动保留本地 `data/` 中的记录。若需要全新演示数据，请在服务停止后自行换一个 `DATA_ROOT`，例如 `DATA_ROOT=tmp-demo pnpm dev`。
 
-### 5.2 完整部署宿主
+### 5.2 启动真实 Intake 和 Pi worker
 
-除上节的本地验证入口外，仓库仍没有完整部署所需的 Worker/真实 Pi 依赖注入、环境 Profile 接线和生产 HTTP bootstrap。`apps/bug-api/src/index.ts` 导出 `BugApiServer`，`apps/bug-web/src/index.ts` 导出页面渲染函数，`apps/orchestrator/src/index.ts` 导出 `Orchestrator`；这些模块不会自行构造全部生产依赖。`pnpm start` 只能启动上一节所述的本地验证模式，不能启动完整修复系统。
+在 `.env` 中补齐以下值：
 
-生产部署需要一个宿主入口（可由部署方放在本仓库之外，或后续补充到本仓库）来创建依赖、挂载路由并管理生命周期。下面是实际类接口对应的最小结构，示例中的 `piSdk` 和 HTTP 页面路由仍需宿主提供：
+```dotenv
+LLM_ENDPOINT_URL=http://your-endpoint/v1
+LLM_MODEL=your-model
+LLM_API_KEY=
+INTAKE_CONFIG_PATH=config/bug-intake.md
+ENVIRONMENT_CONFIG_PATH=config/environments.yaml
 
-```ts
-import { openDatabase, SQLiteBugRepository } from '@llmbugfix/bug-repository';
-import { BugApiServer } from '@llmbugfix/bug-api';
-import { renderIndexHtml, renderDashboardHtml, renderDetailHtml } from '@llmbugfix/bug-web';
-import { EnvironmentResolver } from '@llmbugfix/environment-resolver';
-import { JobQueue } from '@llmbugfix/job-queue';
-import { RepoManager } from '@llmbugfix/repo-manager';
-import { EnvironmentRunner } from '@llmbugfix/environment-runner';
-import { PiAgentRunner } from '@llmbugfix/pi-runner';
-// Orchestrator 目前位于 apps/orchestrator，未声明 workspace package；
-// 宿主按实际构建输出配置本地导入路径后再启用此 import：
-// import { Orchestrator } from '<host-configured path to apps/orchestrator>';
+FRONTEND_MAIN_REPOSITORY=/absolute/path/to/frontend-repo
+BACKEND_MAIN_REPOSITORY=/absolute/path/to/backend-repo
 
-const config = /* 读取并校验 process.env，至少提供 DATA_ROOT 等 AppConfig 字段 */;
-const db = openDatabase(config.DATABASE_PATH);
-const repo = new SQLiteBugRepository(db);
-const queue = new JobQueue(repo, `${config.DATA_ROOT}/queue`, { autoAcquireLock: true });
-const environments = new EnvironmentResolver('config/environments.yaml', process.cwd());
-const repoManager = new RepoManager({
-  worktreesRoot: `${config.DATA_ROOT}/worktrees`,
-  repositoryRoots: ['/srv/repos'],
-  allowedRemoteHosts: (process.env.GIT_ALLOWED_HOSTS ?? 'localhost').split(',').map(x => x.trim()),
-});
-const envRunner = new EnvironmentRunner();
-const orchestrator = new Orchestrator(config, repo, queue, environments, repoManager, envRunner,
-  new PiAgentRunner(piSdk));
-const api = new BugApiServer({ ...process.env, ...config }, {
-  repo, queue, environments,
-  // attachments: new AttachmentService(`${config.DATA_ROOT}/attachments`, ...),
-});
-
-orchestrator.start(2_000);
-await api.listen(Number(process.env.PORT ?? 8033), '127.0.0.1');
+DRY_RUN=true
 ```
 
-上段是宿主集成骨架，不是仓库中现成的启动脚本；尖括号导入路径必须由宿主替换，不能原样执行。`apps/orchestrator` 没有声明可安装的 workspace 包名，宿主应按实际构建输出导入该类，或自行配置路径。挂载页面时，宿主应将 `/` 返回 `renderIndexHtml()`、`/dashboard` 返回 `renderDashboardHtml()`、`/bugs/:id` 返回 `renderDetailHtml(id)`，并把 API 请求转发到同一个 `BugApiServer`。`BugApiServer.listen()` 返回实际端口，关闭时调用 `api.close()`、`orchestrator.stop()`、`queue.close()` 和 `db.close()`。
+然后仍然只运行 `pnpm dev`。启动入口会把同一个 endpoint 接给 Intake、Pi Fixer 和 Pi Reviewer，加载 Intake Markdown 与 environment profiles，校验每个 repository 是批准的本地 Git checkout，并在同一进程启动单 worker。任一 LLM 配置只填写一半、Markdown 不可读、Profile 环境变量缺失或 repository 无效都会直接报配置错误，不会静默使用 Fake Agent。
 
-部署建议先使用 `127.0.0.1` 和反向代理/内网访问；当前 API 没有认证授权实现，不能直接暴露到不可信网络。
+Endpoint 必须兼容 OpenAI Chat Completions，并支持 tool calls/function calling；Pi 负责完整的 Agent/tool loop。Fixer 可使用 `read/grep/find/ls/edit/write/bash`，Reviewer 只有 `read/grep/find/ls`。两者使用独立的内存 session，不读取服务器用户的全局 Pi extensions、skills、prompts 或 context。
+
+第一版 Pi 的内置 `bash` 尚未接入容器或系统级 sandbox；Prompt 中的“禁止网络、push、deploy”只是行为约束。因此只能对受信任的 Bug、受信任的 repository 和隔离测试机启用真实 worker。保持 `DRY_RUN=true` 只会禁止最后的 commit/push，并不会限制 Fixer 在 worktree 中执行 shell 命令。
 
 ## 6. 测试人员提交 Bug
 

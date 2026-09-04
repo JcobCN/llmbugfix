@@ -22,6 +22,7 @@ export type QueueLike = {
 };
 type EnvironmentSource = {
     listProfiles(): unknown[];
+    resolveProfile?: (target: string, requestedProfileId?: string) => unknown;
 };
 export type PageRenderer = (pathname: string) => string | undefined;
 export type ApiDependencies = {

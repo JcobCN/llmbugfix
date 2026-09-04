@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": { "node": ">=22.19.0" },
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "start": "pnpm build && node apps/bug-api/src/local-server.js",
@@ -12,6 +13,7 @@
     "build": "tsc -b --pretty false && node scripts/prepare-local-dist.mjs"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.4",
     "better-sqlite3": "^11.10.0",
     "drizzle-orm": "^0.38.4",
     "pino": "^9.14.0",

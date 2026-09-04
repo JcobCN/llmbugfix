@@ -11,7 +11,7 @@ export const CORE_QUESTIONS: readonly InterviewQuestion[] = [
   { field: 'expectedBehavior', text: '正常情况下你期望发生什么？', importance: 'critical' },
   { field: 'reproduction.steps', text: '能提供从开始到出现问题的操作步骤吗？', importance: 'critical' },
   { field: 'executionTarget', text: '问题主要发生在前端界面，还是后端服务/API？也可以回答“不确定”。', importance: 'critical' },
-  { field: 'environmentProfileId', text: '这是在哪个环境或版本中发生的？', importance: 'high' },
+  { field: 'environmentProfileId', text: '这个 Bug 属于哪个项目或模块？请选择系统提供的项目/模块名称。', importance: 'high' },
   { field: 'evidence', text: '是否有错误信息、日志、堆栈、截图或 HAR 可以提供？没有也可以回答 unknown。', importance: 'high' },
   { field: 'impact.scope', text: '影响范围是单个用户、部分用户，还是所有用户？', importance: 'medium' },
 ];
