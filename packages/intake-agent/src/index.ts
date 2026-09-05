@@ -394,6 +394,24 @@ Rules:
 15. Do not ask for internal field names or schema values. Ask for human-understandable facts only.
 16. Return only JSON matching the supplied IntakeTurnResult schema. The optional profile shape is { name?, repositoryUrl?, defaultBranch?, target?: "frontend"|"backend", setupCommands?: string[], validationCommands?: string[] }.`;
 
+const INTAKE_OUTPUT_CONTRACT = `Return a JSON object with ALL of these top-level fields:
+{
+  "fieldUpdates": {},
+  "observations": [],
+  "reporterHypotheses": [],
+  "contradictions": [],
+  "possibleSensitiveData": false,
+  "executionTargetConfidence": 0,
+  "questions": [],
+  "readyForConfirmation": false
+}
+fieldUpdates is a partial BugReport draft: include only supported facts that changed; omit unknown fields. Common fields are title, actualBehavior, expectedBehavior (strings), executionTarget ("frontend", "backend", or "unknown"), productArea, component, environmentProfileId (strings or null), reproduction (object with steps/prerequisites/testData string arrays, reproducible boolean or null, frequency "always"|"often"|"sometimes"|"rare"|"once"|"unknown"), environment (object with environmentName/appVersion/buildNumber/commitSha strings or null and additionalInfo mapping strings to strings), evidence (object with errorMessages/stackTraces string arrays), and environmentProfile as described above. Do not use prose strings in place of nested objects.
+observations and reporterHypotheses are arrays of strings; keep facts and speculation separate.
+contradictions is an array of objects { "field": string, "previousValue": any JSON value, "newValue": any JSON value }.
+possibleSensitiveData and readyForConfirmation are booleans. executionTargetConfidence is a number from 0 to 1; use 0 when unknown.
+questions is an array of at most 3 OBJECTS, each { "field": string, "text": string, "importance": "critical"|"high"|"medium"|"low" }; never an array of strings. Use a draft field path for field and a human-readable question for text.
+Use empty arrays when there are no items. Do not omit required fields. The example illustrates structure only; determine values from the reporter's data.`;
+
 export type IntakeModelInput = {
   currentDraft: BugReportDraft;
   /** Relevant recent messages only; callers should include the latest message separately. */
@@ -548,19 +566,31 @@ export class OpenAICompatibleIntakeModel implements IntakeModel {
   async complete(input: IntakeModelInput): Promise<IntakeTurnResult> {
     const messages = input.relevantMessages ?? input.messages ?? [];
     const systemPrompt = this.options.intakeInstructions?.trim() ? `${BUG_INTAKE_SYSTEM_PROMPT}\n\nDeployment-specific intake requirements:\n${this.options.intakeInstructions.trim()}` : BUG_INTAKE_SYSTEM_PROMPT;
-    const payload = { model: this.options.model, temperature: 0, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: JSON.stringify({ currentDraft: input.currentDraft, relevantRecentMessages: messages.slice(-12), latestMessage: input.latestMessage ?? input.userMessage ?? '' }) }], response_format: { type: 'json_object' } };
+    const payload = { model: this.options.model, temperature: 0, messages: [{ role: 'system', content: `${systemPrompt}\n\n${INTAKE_OUTPUT_CONTRACT}` }, { role: 'user', content: JSON.stringify({ currentDraft: input.currentDraft, relevantRecentMessages: messages.slice(-12), latestMessage: input.latestMessage ?? input.userMessage ?? '' }) }], response_format: { type: 'json_object' } };
     const timeoutMs = this.options.timeoutMs ?? 15_000;
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
-      const response = await this.request(this.endpoint, { method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json', ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {}) }, body: JSON.stringify(payload), signal: controller.signal });
-      if (!response.ok) throw new Error(`Intake LLM returned HTTP ${response.status}`);
-      const body = await response.json() as { choices?: Array<{ message?: { content?: string | unknown } }> };
-      const content = body.choices?.[0]?.message?.content;
-      if (typeof content !== 'string') throw new Error('Intake LLM response did not contain JSON content');
-      let parsed: unknown; try { parsed = JSON.parse(content); } catch { throw new Error('Intake LLM returned invalid JSON'); }
-      return IntakeTurnResultSchema.parse(parsed);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await this.request(this.endpoint, { method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json', ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {}) }, body: JSON.stringify(payload), signal: controller.signal });
+        if (!response.ok) throw new Error(`Intake LLM returned HTTP ${response.status}`);
+        const body = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
+        const content = body.choices?.[0]?.message?.content;
+        let validationError: string;
+        if (typeof content !== 'string') validationError = 'Response must contain JSON text.';
+        else {
+          try {
+            const result = IntakeTurnResultSchema.safeParse(JSON.parse(content));
+            if (result.success) return result.data;
+            // Report paths/types only, without copying potentially sensitive model output.
+            validationError = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('\n');
+          } catch { validationError = 'Response must be valid JSON.'; }
+        }
+        if (attempt === 1) throw new Error(`Intake LLM returned an invalid IntakeTurnResult after one correction attempt: ${validationError}`);
+        payload.messages.push({ role: 'user', content: `Your response failed output validation:\n${validationError}\nGenerate the complete result again from the original reporter data, following the output contract. Do not invent facts to satisfy validation.` });
+      }
+      throw new Error('Intake LLM did not produce a result');
     } catch (error) {
       if (timedOut && error instanceof Error && error.name === 'AbortError') throw new Error(`Intake LLM request timed out after ${timeoutMs}ms`, { cause: error });
       throw error;

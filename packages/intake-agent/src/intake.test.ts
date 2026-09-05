@@ -165,6 +165,34 @@ describe('Intake Agent & Service', () => {
     expect(requestUrl).toBe('https://llm.example.test/v1/chat/completions');
   });
 
+  it('corrects missing model fields and string questions without weakening validation', async () => {
+    const bodies: any[] = [];
+    const valid = { fieldUpdates: { actualBehavior: '页面坏了' }, observations: ['页面坏了'], reporterHypotheses: [], contradictions: [], possibleSensitiveData: false, executionTargetConfidence: 0, questions: [{ field: 'expectedBehavior', text: '预期是什么？', importance: 'high' }], readyForConfirmation: false };
+    const request: typeof fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      const result = bodies.length === 1 ? { fieldUpdates: {}, questions: ['预期是什么？'] } : valid;
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(result) } }] }));
+    };
+    const model = new OpenAICompatibleIntakeModel({ baseUrl: 'https://llm.example.test/v1', model: 'test', fetch: request });
+    await expect(model.complete({ currentDraft: {}, latestMessage: '页面坏了' })).resolves.toEqual(valid);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].messages[0].content).toContain('"observations": []');
+    expect(bodies[0].messages[0].content).toContain('never an array of strings');
+    expect(bodies[1].messages.at(-1).content).toContain('questions.0');
+    expect(bodies[1].messages[1].content).toContain('页面坏了');
+  });
+
+  it.each(['{}', 'not json'])('bounds correction attempts for invalid model content: %s', async (content) => {
+    let calls = 0;
+    const request: typeof fetch = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+    };
+    const model = new OpenAICompatibleIntakeModel({ baseUrl: 'https://llm.example.test/v1', model: 'test', fetch: request });
+    await expect(model.complete({ currentDraft: {}, latestMessage: '页面坏了' })).rejects.toThrow('invalid IntakeTurnResult after one correction attempt');
+    expect(calls).toBe(2);
+  });
+
   it('reports an Intake LLM timeout instead of exposing AbortError', async () => {
     const request: typeof fetch = async (_url, init) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => {
