@@ -65,6 +65,7 @@ LLM_API_KEY=optional
 INTAKE_CONFIG_PATH=config/bug-intake.md
 FIXER_TIMEOUT_MS=2700000
 REVIEWER_TIMEOUT_MS=900000
+INTAKE_LLM_TIMEOUT_MS=60000
 ```
 
 | 配置 | 要求 |
@@ -75,6 +76,7 @@ REVIEWER_TIMEOUT_MS=900000
 | `INTAKE_CONFIG_PATH` | 必填或使用 `config/bug-intake.md` 默认值。必须是仓库/部署允许根目录内的 Markdown 文件，并执行存在性、大小和 regular-file 校验。 |
 | `FIXER_TIMEOUT_MS` | 正整数，默认 `2_700_000`（45 分钟）；超时必须取消 Pi session，并将 job 标记为失败。 |
 | `REVIEWER_TIMEOUT_MS` | 正整数，默认 `900_000`（15 分钟）；超时必须取消 Reviewer session，并将 job 标记为失败。 |
+| `INTAKE_LLM_TIMEOUT_MS` | 正整数，默认 `60_000`（60 秒）；同时用于 Intake 和 Document Reconciler 的 OpenAI-compatible 请求，超时必须返回明确的 timeout 错误。 |
 
 已有的 `DATABASE_PATH`、`DATA_ROOT`、`PORT`、`DRY_RUN`、`config/environments.yaml` 等配置仍遵守 WP01/WP04/WP05。Repository 的真实路径由受批准的 profile 配置和部署环境变量提供，不从 Intake 请求中直接读取。
 

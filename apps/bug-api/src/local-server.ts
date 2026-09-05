@@ -88,7 +88,8 @@ if (llmEnabled) {
   const intakeRequirements = loadIntakeInstructions(process.env.INTAKE_CONFIG_PATH ?? 'config/bug-intake.md');
   const allowedProjects = profiles.map(({ id, name, target }) => ({ id, name, target }));
   const instructions = `${intakeRequirements}\n\nExisting project profiles (when applicable, use the exact id as environmentProfileId):\n${JSON.stringify(allowedProjects, null, 2)}\n\nFor a project not shown here, ask the tester for its remote Git clone address. Return the remote in environmentProfile.repositoryUrl so the server can clone it locally and generate the runnable profile after confirmation.`;
-  const llmOptions = { baseUrl: endpointUrl!, model: model!, ...(process.env.LLM_API_KEY?.trim() ? { apiKey: process.env.LLM_API_KEY.trim() } : {}), intakeInstructions: instructions };
+  const intakeTimeoutMs = positiveInteger(process.env.INTAKE_LLM_TIMEOUT_MS, 60_000, 'INTAKE_LLM_TIMEOUT_MS');
+  const llmOptions = { baseUrl: endpointUrl!, model: model!, ...(process.env.LLM_API_KEY?.trim() ? { apiKey: process.env.LLM_API_KEY.trim() } : {}), intakeInstructions: instructions, timeoutMs: intakeTimeoutMs };
   intake = new IntakeService(new OpenAICompatibleIntakeModel(llmOptions), new OpenAICompatibleDocumentReconciler(llmOptions));
 
   const worktreesRoot = path.resolve(config.DATA_ROOT, 'worktrees');

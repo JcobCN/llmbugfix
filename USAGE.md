@@ -56,6 +56,7 @@ cp .env.example .env
 | `LLM_ENDPOINT_URL` | 空 | OpenAI-compatible base URL；与 `LLM_MODEL` 同时配置后启用真实 Intake 和 Pi worker |
 | `LLM_MODEL` | 空 | endpoint 提供的模型 id |
 | `LLM_API_KEY` | 空 | 可选 endpoint credential；不得写入 prompt、日志或产物 |
+| `INTAKE_LLM_TIMEOUT_MS` | `60000` | Intake 和 Document Reconciler 的 LLM 请求超时，60 秒；必须是正整数 |
 | `PI_SANDBOX_PROFILE` | 空 | 外部宿主/容器隔离配置名称；未设置时真实 Pi worker fail-closed，不会启动 |
 | `INTAKE_CONFIG_PATH` | `config/bug-intake.md` | 测试人员必须提供的信息和追问规则 |
 | `ENVIRONMENT_CONFIG_PATH` | 未配置（可选） | 可选的静态 Profile 目录；不配置时使用 Intake 确认后生成的 Profile |
@@ -120,6 +121,7 @@ pnpm dev
 LLM_ENDPOINT_URL=http://your-endpoint/v1
 LLM_MODEL=your-model
 LLM_API_KEY=
+INTAKE_LLM_TIMEOUT_MS=60000
 INTAKE_CONFIG_PATH=config/bug-intake.md
 # Optional: load a pre-registered static profile catalog.
 # ENVIRONMENT_CONFIG_PATH=config/environments.yaml

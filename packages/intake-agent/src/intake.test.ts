@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { FakeDocumentReconciler, FakeIntakeModel, IntakeService, OpenAICompatibleIntakeModel, applyDocumentReconciliation, mergeBugDocument, mergeDraft, reconcileBugDocument, renderBugDocument, sha256Document } from '@llmbugfix/intake-agent';
+import { FakeDocumentReconciler, FakeIntakeModel, IntakeService, OpenAICompatibleDocumentReconciler, OpenAICompatibleIntakeModel, applyDocumentReconciliation, mergeBugDocument, mergeDraft, reconcileBugDocument, renderBugDocument, sha256Document } from '@llmbugfix/intake-agent';
 import type { BugReportDraft } from '@llmbugfix/bug-domain';
 import { evaluateCompleteness } from '@llmbugfix/intake-policy';
 
@@ -163,5 +163,31 @@ describe('Intake Agent & Service', () => {
     expect(requestBody.messages[0].content).toContain('Require module alpha.');
     expect(String(requestBody.messages[1].content)).toContain('页面坏了');
     expect(requestUrl).toBe('https://llm.example.test/v1/chat/completions');
+  });
+
+  it('reports an Intake LLM timeout instead of exposing AbortError', async () => {
+    const request: typeof fetch = async (_url, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        const error = new Error('This operation was aborted');
+        error.name = 'AbortError';
+        reject(error);
+      }, { once: true });
+    });
+    const model = new OpenAICompatibleIntakeModel({ baseUrl: 'https://llm.example.test/v1', model: 'test-model', timeoutMs: 10, fetch: request });
+
+    await expect(model.complete({ currentDraft: {}, latestMessage: '页面坏了' })).rejects.toThrow('Intake LLM request timed out after 10ms');
+  });
+
+  it('reports a Document Reconciler timeout with its operation name', async () => {
+    const request: typeof fetch = async (_url, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        const error = new Error('This operation was aborted');
+        error.name = 'AbortError';
+        reject(error);
+      }, { once: true });
+    });
+    const reconciler = new OpenAICompatibleDocumentReconciler({ baseUrl: 'https://llm.example.test/v1', model: 'test-model', timeoutMs: 10, fetch: request });
+
+    await expect(reconciler.reconcile({ currentDraft: {}, markdown: '# Bug', documentRevision: 1, documentSha256: sha256Document('# Bug') })).rejects.toThrow('Document reconciler request timed out after 10ms');
   });
 });
