@@ -582,7 +582,9 @@ function chatCompletionsEndpoint(baseUrl: string): URL {
   const normalized = baseUrl.trim().replace(/\/+$/u, '');
   return assertCompatibleEndpoint(/\/chat\/completions$/iu.test(normalized) ? normalized : `${normalized}/chat/completions`);
 }
-export type OpenAICompatibleIntakeModelOptions = { baseUrl: string; model: string; apiKey?: string; timeoutMs?: number; fetch?: typeof globalThis.fetch; intakeInstructions?: string };
+/** Minimal structural logger so callers can pass a pino logger without a package dependency. */
+export type IntakeLogger = { info: (obj: object, msg: string) => void; error: (obj: object, msg: string) => void };
+export type OpenAICompatibleIntakeModelOptions = { baseUrl: string; model: string; apiKey?: string; timeoutMs?: number; fetch?: typeof globalThis.fetch; intakeInstructions?: string; logger?: IntakeLogger };
 export class OpenAICompatibleIntakeModel implements IntakeModel {
   private readonly endpoint: URL;
   private readonly request: typeof globalThis.fetch;
@@ -605,8 +607,9 @@ export class OpenAICompatibleIntakeModel implements IntakeModel {
       const arm = (): void => { clearTimeout(timer); timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs); };
       try {
         arm();
+        this.options.logger?.info({ endpoint: this.endpoint.href, model: this.options.model, attempt: attempt + 1, messages: payload.messages }, 'intake llm request');
         const response = await this.request(this.endpoint, { method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json', ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {}) }, body: JSON.stringify(payload), signal: controller.signal });
-        if (!response.ok) throw new Error(`Intake LLM returned HTTP ${response.status}`);
+        if (!response.ok) { this.options.logger?.error({ status: response.status, attempt: attempt + 1 }, 'intake llm request failed'); throw new Error(`Intake LLM returned HTTP ${response.status}`); }
         const contentType = response.headers.get('content-type') ?? '';
         let content: string | undefined;
         if (onProgress && contentType.includes('text/event-stream')) content = await this.readStreamedContent(response, onProgress, arm);
@@ -615,6 +618,7 @@ export class OpenAICompatibleIntakeModel implements IntakeModel {
           const value = body.choices?.[0]?.message?.content;
           if (typeof value === 'string') content = value;
         }
+        if (typeof content === 'string') this.options.logger?.info({ attempt: attempt + 1, content }, 'intake llm response');
         let validationError: string;
         if (typeof content !== 'string') validationError = 'Response must contain JSON text.';
         else {
@@ -625,7 +629,7 @@ export class OpenAICompatibleIntakeModel implements IntakeModel {
             validationError = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('\n');
           } catch { validationError = 'Response must be valid JSON.'; }
         }
-        if (attempt === 1) throw new Error(`Intake LLM returned an invalid IntakeTurnResult after one correction attempt: ${validationError}`);
+        if (attempt === 1) { this.options.logger?.error({ attempt: attempt + 1, validationError, content }, 'intake llm response failed validation'); throw new Error(`Intake LLM returned an invalid IntakeTurnResult after one correction attempt: ${validationError}`); }
         payload.messages.push({ role: 'user', content: `Your response failed output validation:\n${validationError}\nGenerate the complete result again from the original reporter data, following the output contract. Do not invent facts to satisfy validation.` });
       } catch (error) {
         if (timedOut && error instanceof Error && error.name === 'AbortError') throw new Error(`Intake LLM request timed out after ${timeoutMs}ms`, { cause: error });
@@ -673,7 +677,7 @@ export class OpenAICompatibleIntakeModel implements IntakeModel {
 export const OpenAIIntakeModel = OpenAICompatibleIntakeModel;
 
 export type OpenAICompatibleDocumentReconcilerOptions = {
-  baseUrl: string; model: string; apiKey?: string; timeoutMs?: number; fetch?: typeof globalThis.fetch; intakeInstructions?: string;
+  baseUrl: string; model: string; apiKey?: string; timeoutMs?: number; fetch?: typeof globalThis.fetch; intakeInstructions?: string; logger?: IntakeLogger;
 };
 
 /** OpenAI-compatible adapter kept separate from IntakeModel so clean documents skip a model call. */
@@ -693,15 +697,19 @@ export class OpenAICompatibleDocumentReconciler implements DocumentReconciler {
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
+      this.options.logger?.info({ endpoint: this.endpoint.href, model: this.options.model, messages: payload.messages }, 'document reconciler request');
       const response = await this.request(this.endpoint, { method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json', ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {}) }, body: JSON.stringify(payload), signal: controller.signal });
-      if (!response.ok) throw new Error(`Document reconciler returned HTTP ${response.status}`);
+      if (!response.ok) { this.options.logger?.error({ status: response.status }, 'document reconciler request failed'); throw new Error(`Document reconciler returned HTTP ${response.status}`); }
       const body = await response.json() as { choices?: Array<{ message?: { content?: string | unknown } }> };
       const content = body.choices?.[0]?.message?.content;
       if (typeof content !== 'string') throw new Error('Document reconciler response did not contain JSON content');
-      let parsed: unknown; try { parsed = JSON.parse(content); } catch { throw new Error('Document reconciler returned invalid JSON'); }
-      return DocumentReconciliationResultSchema.parse(parsed);
+      this.options.logger?.info({ content }, 'document reconciler response');
+      let parsed: unknown; try { parsed = JSON.parse(content); } catch { this.options.logger?.error({ content }, 'document reconciler returned invalid JSON'); throw new Error('Document reconciler returned invalid JSON'); }
+      const checked = DocumentReconciliationResultSchema.safeParse(parsed);
+      if (!checked.success) { this.options.logger?.error({ issues: checked.error.issues, content }, 'document reconciler response failed validation'); throw checked.error; }
+      return checked.data;
     } catch (error) {
-      if (timedOut && error instanceof Error && error.name === 'AbortError') throw new Error(`Document reconciler request timed out after ${timeoutMs}ms`, { cause: error });
+      if (timedOut && error instanceof Error && error.name === 'AbortError') { this.options.logger?.error({ timeoutMs }, 'document reconciler request timed out'); throw new Error(`Document reconciler request timed out after ${timeoutMs}ms`, { cause: error }); }
       throw error;
     } finally { clearTimeout(timer); }
   }

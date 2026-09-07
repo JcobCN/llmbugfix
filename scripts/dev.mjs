@@ -10,6 +10,8 @@ const listenAllInterfaces = process.argv.slice(2).includes('--host');
 const serverEnv = {
   ...process.env,
   ...(listenAllInterfaces ? { BUGFIX_LISTEN_HOST: '0.0.0.0' } : {}),
+  // Dev defaults to logging full LLM request/response exchanges; opt out with INTAKE_LLM_LOG=0.
+  ...(process.env.INTAKE_LLM_LOG === undefined ? { INTAKE_LLM_LOG: '1' } : {}),
 };
 let server;
 let restartChain = Promise.resolve();
