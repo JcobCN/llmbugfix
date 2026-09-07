@@ -8,7 +8,8 @@ export interface QueueJob {
   id: string; bugId: string; status: QueueJobStatus; priority: number; attempt: number; createdAt: string;
   startedAt: string | null; finishedAt: string | null; heartbeatAt: string | null; error: string | null; workerId?: string | null;
 }
-export interface JobQueueOptions { lockFileName?: string; autoAcquireLock?: boolean; }
+export interface JobQueueOptions { lockFileName?: string; autoAcquireLock?: boolean; /** How long to wait for a live holder to release the lock before failing. */
+  lockAcquireTimeoutMs?: number; }
 
 /**
  * SQLite-backed single-task queue. Every state transition is one transaction;
@@ -19,11 +20,13 @@ export class JobQueue {
   private readonly lockFilePath: string;
   private lockFd: number | null = null;
   private readonly workerPid = process.pid;
+  private readonly lockAcquireTimeoutMs: number;
 
   constructor(repo: SQLiteBugRepository, private readonly dataDir: string, options: JobQueueOptions = {}) {
     this.database = repo.database;
     fs.mkdirSync(this.dataDir, { recursive: true });
     this.lockFilePath = path.join(this.dataDir, options.lockFileName ?? 'orchestrator.lock');
+    this.lockAcquireTimeoutMs = Math.max(0, options.lockAcquireTimeoutMs ?? 5_000);
     this.ensureQueueSchema();
     if (options.autoAcquireLock) this.acquireProcessLock();
   }
@@ -39,23 +42,34 @@ export class JobQueue {
 
   public acquireProcessLock(): void {
     if (this.lockFd !== null) return;
-    let fd: number;
-    try { fd = fs.openSync(this.lockFilePath, 'wx', 0o600); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      if (this.removeDeadLock()) {
-        fd = fs.openSync(this.lockFilePath, 'wx', 0o600);
-      } else throw new Error(`Worker process lock is held: ${this.lockFilePath}`);
+    // A live holder may still be shutting down (dev restarts race the graceful
+    // close path), so retry briefly before declaring the lock unavailable.
+    const deadline = Date.now() + this.lockAcquireTimeoutMs;
+    for (;;) {
+      let fd: number;
+      try { fd = fs.openSync(this.lockFilePath, 'wx', 0o600); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (this.removeDeadLock()) continue;
+        if (Date.now() >= deadline) throw new Error(`Worker process lock is held: ${this.lockFilePath}`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+        continue;
+      }
+      fs.writeFileSync(fd, JSON.stringify({ pid: this.workerPid, startedAt: now() }), { encoding: 'utf8' });
+      this.lockFd = fd;
+      return;
     }
-    fs.writeFileSync(fd, JSON.stringify({ pid: this.workerPid, startedAt: now() }), { encoding: 'utf8' });
-    this.lockFd = fd;
   }
   public acquireLock(): void { this.acquireProcessLock(); }
 
   private removeDeadLock(): boolean {
     try {
-      const value = JSON.parse(fs.readFileSync(this.lockFilePath, 'utf8')) as { pid?: number };
-      if (typeof value.pid === 'number') { try { process.kill(value.pid, 0); return false; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false; } }
+      const raw = fs.readFileSync(this.lockFilePath, 'utf8');
+      // An empty or corrupt file means a holder crashed between creating the
+      // lock and writing its pid; the lock is stale and safe to take over.
+      let pid: number | undefined;
+      try { pid = (JSON.parse(raw) as { pid?: number }).pid; } catch { pid = undefined; }
+      if (typeof pid === 'number') { try { process.kill(pid, 0); return false; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false; } }
       fs.unlinkSync(this.lockFilePath); return true;
     } catch { return false; }
   }
