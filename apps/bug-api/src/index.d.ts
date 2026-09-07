@@ -94,6 +94,10 @@ export declare class BugApiServer {
     private documentResponse;
     private markDocumentConflict;
     private persistGeneratedDocument;
+    /** Shared chat-message pipeline used by both the JSON and the SSE endpoints. */
+    private runMessagePipeline;
+    /** SSE variant of the chat pipeline: stage/progress/heartbeat events, then result or error. */
+    private streamMessagePipeline;
     private handleConversation;
     private submit;
     private handleBug;

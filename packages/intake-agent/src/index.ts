@@ -428,9 +428,18 @@ export type IntakeModelInput = {
   documentSha256?: string;
   /** Legacy compatibility metadata; it is not a protection mechanism for chat corrections. */
   userEditedFields?: readonly string[];
+  /** Optional listener receiving live progress (stages and streamed model deltas). */
+  onProgress?: IntakeProgressListener;
 };
 
 export interface IntakeModel { complete(input: IntakeModelInput): Promise<IntakeTurnResult>; }
+
+/** Live progress emitted while a turn is being processed. Model deltas are
+ * best-effort extractions from a partially streamed JSON document. */
+export type IntakeProgressEvent =
+  | { type: 'stage'; stage: 'reconciling_document' | 'analyzing' }
+  | { type: 'model_delta'; chars: number; partialQuestions: string[] };
+export type IntakeProgressListener = (event: IntakeProgressEvent) => void;
 
 export const IntakeModelInputSchema = z.object({
   currentDraft: BugReportDraftSchema,
@@ -443,6 +452,21 @@ export const IntakeModelInputSchema = z.object({
   documentSha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
   userEditedFields: z.array(z.string()).optional(),
 });
+
+/** Best-effort extraction of question texts from a partially streamed JSON
+ * document, so callers can render the assistant reply while it is generated. */
+export function extractPartialQuestions(buffer: string): string[] {
+  const start = buffer.indexOf('"questions"');
+  if (start < 0) return [];
+  const questions: string[] = [];
+  for (const match of buffer.slice(start).matchAll(/"text"\s*:\s*"((?:[^"\\]|\\.)*)/gu)) {
+    let text = match[1] ?? '';
+    try { text = JSON.parse(`"${text}"`) as string; } catch { /* keep the raw partial string */ }
+    if (text.trim()) questions.push(text.trim());
+    if (questions.length >= 3) break;
+  }
+  return questions;
+}
 
 const unknownWord = /^(unknown|不清楚|不知道|不确定|无法获得|无)$/i;
 const sensitive = /(password|passwd|token|secret|api[_ -]?key|cookie|authorization|Bearer\s+[\w.-]+|密码|口令|令牌|私钥)/i;
@@ -566,17 +590,31 @@ export class OpenAICompatibleIntakeModel implements IntakeModel {
   async complete(input: IntakeModelInput): Promise<IntakeTurnResult> {
     const messages = input.relevantMessages ?? input.messages ?? [];
     const systemPrompt = this.options.intakeInstructions?.trim() ? `${BUG_INTAKE_SYSTEM_PROMPT}\n\nDeployment-specific intake requirements:\n${this.options.intakeInstructions.trim()}` : BUG_INTAKE_SYSTEM_PROMPT;
-    const payload = { model: this.options.model, temperature: 0, messages: [{ role: 'system', content: `${systemPrompt}\n\n${INTAKE_OUTPUT_CONTRACT}` }, { role: 'user', content: JSON.stringify({ currentDraft: input.currentDraft, relevantRecentMessages: messages.slice(-12), latestMessage: input.latestMessage ?? input.userMessage ?? '' }) }], response_format: { type: 'json_object' } };
+    const payload: { model: string; temperature: number; messages: Array<{ role: string; content: string }>; response_format: { type: string }; stream?: boolean } = { model: this.options.model, temperature: 0, messages: [{ role: 'system', content: `${systemPrompt}\n\n${INTAKE_OUTPUT_CONTRACT}` }, { role: 'user', content: JSON.stringify({ currentDraft: input.currentDraft, relevantRecentMessages: messages.slice(-12), latestMessage: input.latestMessage ?? input.userMessage ?? '' }) }], response_format: { type: 'json_object' } };
     const timeoutMs = this.options.timeoutMs ?? 15_000;
-    const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
-    try {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
+    const onProgress = input.onProgress;
+    // Streaming is only requested when a caller wants progress; the JSON
+    // fallback below keeps endpoints without SSE support working.
+    if (onProgress) payload.stream = true;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const controller = new AbortController();
+      let timedOut = false;
+      // Streaming responses re-arm this timer per chunk, so the timeout is an
+      // inactivity bound rather than a whole-generation bound.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const arm = (): void => { clearTimeout(timer); timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs); };
+      try {
+        arm();
         const response = await this.request(this.endpoint, { method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json', ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {}) }, body: JSON.stringify(payload), signal: controller.signal });
         if (!response.ok) throw new Error(`Intake LLM returned HTTP ${response.status}`);
-        const body = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
-        const content = body.choices?.[0]?.message?.content;
+        const contentType = response.headers.get('content-type') ?? '';
+        let content: string | undefined;
+        if (onProgress && contentType.includes('text/event-stream')) content = await this.readStreamedContent(response, onProgress, arm);
+        else {
+          const body = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
+          const value = body.choices?.[0]?.message?.content;
+          if (typeof value === 'string') content = value;
+        }
         let validationError: string;
         if (typeof content !== 'string') validationError = 'Response must contain JSON text.';
         else {
@@ -589,12 +627,47 @@ export class OpenAICompatibleIntakeModel implements IntakeModel {
         }
         if (attempt === 1) throw new Error(`Intake LLM returned an invalid IntakeTurnResult after one correction attempt: ${validationError}`);
         payload.messages.push({ role: 'user', content: `Your response failed output validation:\n${validationError}\nGenerate the complete result again from the original reporter data, following the output contract. Do not invent facts to satisfy validation.` });
+      } catch (error) {
+        if (timedOut && error instanceof Error && error.name === 'AbortError') throw new Error(`Intake LLM request timed out after ${timeoutMs}ms`, { cause: error });
+        throw error;
+      } finally { clearTimeout(timer); }
+    }
+    throw new Error('Intake LLM did not produce a result');
+  }
+  /** Consume an OpenAI-compatible SSE stream, forwarding partial question texts. */
+  private async readStreamedContent(response: Response, onProgress: IntakeProgressListener, activity: () => void): Promise<string> {
+    const body = response.body;
+    if (!body) throw new Error('Intake LLM stream response has no body');
+    const reader = (body as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let content = '';
+    let lastEmit = 0;
+    const emit = (force = false): void => {
+      const current = Date.now();
+      if (!force && current - lastEmit < 100) return;
+      lastEmit = current;
+      onProgress({ type: 'model_delta', chars: content.length, partialQuestions: extractPartialQuestions(content) });
+    };
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      activity();
+      buffer += decoder.decode(value, { stream: true });
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline).replace(/\r$/u, '');
+        buffer = buffer.slice(newline + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        let delta: unknown;
+        try { delta = (JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }> }).choices?.[0]?.delta?.content; } catch { /* skip a malformed chunk */ }
+        if (typeof delta === 'string' && delta) { content += delta; emit(); }
       }
-      throw new Error('Intake LLM did not produce a result');
-    } catch (error) {
-      if (timedOut && error instanceof Error && error.name === 'AbortError') throw new Error(`Intake LLM request timed out after ${timeoutMs}ms`, { cause: error });
-      throw error;
-    } finally { clearTimeout(timer); }
+    }
+    emit(true);
+    return content;
   }
 }
 export const OpenAIIntakeModel = OpenAICompatibleIntakeModel;
@@ -657,13 +730,14 @@ export class IntakeService {
   async reconcileDocument(input: DocumentReconciliationInput): Promise<DocumentReconciliationResult> {
     return DocumentReconciliationResultSchema.parse(await this.documentReconciler.reconcile(DocumentReconciliationInputSchema.parse(input)));
   }
-  async processUserMessage(currentDraft: BugReportDraft, history: ConversationMessage[], userText: string, userEditedFields: readonly string[] = [], document?: DocumentReconciliationInput & { reconciledSha256?: string; syncStatus?: DocumentSyncStatus }) {
+  async processUserMessage(currentDraft: BugReportDraft, history: ConversationMessage[], userText: string, userEditedFields: readonly string[] = [], document?: DocumentReconciliationInput & { reconciledSha256?: string; syncStatus?: DocumentSyncStatus }, onProgress?: IntakeProgressListener) {
     const relevant = history.slice(-12);
     let reconciledDraft = currentDraft;
     let documentReconciliation: DocumentReconciliationResult | undefined;
     const actualSha = document ? sha256Document(document.markdown) : undefined;
     const isDocumentFresh = document && (!document.syncStatus || document.syncStatus === 'synced') && actualSha === document.documentSha256 && document.documentSha256 === (document.reconciledSha256 ?? '');
     if (document && !isDocumentFresh) {
+      onProgress?.({ type: 'stage', stage: 'reconciling_document' });
       documentReconciliation = await this.reconcileDocument({ ...document, documentSha256: actualSha! });
       reconciledDraft = applyDocumentReconciliation(currentDraft, documentReconciliation);
       // Ambiguous edits are an API-level conflict. Do not spend an additional
@@ -674,7 +748,8 @@ export class IntakeService {
         return { turn: conflictTurn, updatedDraft: BugReportDraftSchema.parse(currentDraft), reply: '', completeness: evaluateCompleteness(currentDraft), documentReconciliation, documentContent: undefined };
       }
     }
-    const turn = await this.model.complete({ currentDraft: reconciledDraft, relevantMessages: relevant, latestMessage: userText, userEditedFields, ...(document ? { markdown: document.markdown, documentRevision: document.documentRevision, documentSha256: actualSha } : {}) });
+    onProgress?.({ type: 'stage', stage: 'analyzing' });
+    const turn = await this.model.complete({ currentDraft: reconciledDraft, relevantMessages: relevant, latestMessage: userText, userEditedFields, ...(document ? { markdown: document.markdown, documentRevision: document.documentRevision, documentSha256: actualSha } : {}), ...(onProgress ? { onProgress } : {}) });
     let updatedDraft = mergeDraft(reconciledDraft, turn.fieldUpdates);
     // Keep reporter observations/hypotheses as first-class facts without duplicating a turn
     // when a client retries the same request.
@@ -687,8 +762,8 @@ export class IntakeService {
     const documentContent = document ? mergeBugDocument(document.markdown, updatedDraft, completeness) : undefined;
     return { turn, updatedDraft, reply: turn.questions.length ? turn.questions.map((q, i) => `${i + 1}. ${q.text}`).join('\n') : '我已经整理好了当前 Bug 报告。右侧 Markdown 是当前版本；如果内容正确，可以确认提交，也可以继续修改或补充。', completeness, documentReconciliation, documentContent };
   }
-  async processTurn(currentDraft: BugReportDraft, history: ConversationMessage[], userText: string, userEditedFields: readonly string[] = [], document?: DocumentReconciliationInput & { reconciledSha256?: string; syncStatus?: DocumentSyncStatus }) {
-    return this.processUserMessage(currentDraft, history, userText, userEditedFields, document);
+  async processTurn(currentDraft: BugReportDraft, history: ConversationMessage[], userText: string, userEditedFields: readonly string[] = [], document?: DocumentReconciliationInput & { reconciledSha256?: string; syncStatus?: DocumentSyncStatus }, onProgress?: IntakeProgressListener) {
+    return this.processUserMessage(currentDraft, history, userText, userEditedFields, document, onProgress);
   }
   async complete(input: IntakeModelInput) { return this.model.complete(input); }
 }

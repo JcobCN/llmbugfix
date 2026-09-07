@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { FakeDocumentReconciler, FakeIntakeModel, IntakeService, OpenAICompatibleDocumentReconciler, OpenAICompatibleIntakeModel, applyDocumentReconciliation, mergeBugDocument, mergeDraft, reconcileBugDocument, renderBugDocument, sha256Document } from '@llmbugfix/intake-agent';
+import { FakeDocumentReconciler, FakeIntakeModel, IntakeService, OpenAICompatibleDocumentReconciler, OpenAICompatibleIntakeModel, applyDocumentReconciliation, extractPartialQuestions, mergeBugDocument, mergeDraft, reconcileBugDocument, renderBugDocument, sha256Document, type IntakeModel, type IntakeModelInput, type IntakeProgressEvent, type IntakeTurnResult } from '@llmbugfix/intake-agent';
 import type { BugReportDraft } from '@llmbugfix/bug-domain';
 import { evaluateCompleteness } from '@llmbugfix/intake-policy';
 
@@ -217,5 +217,69 @@ describe('Intake Agent & Service', () => {
     const reconciler = new OpenAICompatibleDocumentReconciler({ baseUrl: 'https://llm.example.test/v1', model: 'test-model', timeoutMs: 10, fetch: request });
 
     await expect(reconciler.reconcile({ currentDraft: {}, markdown: '# Bug', documentRevision: 1, documentSha256: sha256Document('# Bug') })).rejects.toThrow('Document reconciler request timed out after 10ms');
+  });
+
+  it('extracts partial question texts from a half-streamed JSON document', () => {
+    expect(extractPartialQuestions('{"fieldUpdates":{}')).toEqual([]);
+    expect(extractPartialQuestions('{"observations":[],"questions":[{"field":"expectedBehavior","text":"预期是什么')).toEqual(['预期是什么']);
+    expect(extractPartialQuestions('{"questions":[{"text":"步骤是什么？"},{"text":"环境是什么？"},{"text":"影响范围？"},{"text":"第四个不应出现"}]}')).toEqual(['步骤是什么？', '环境是什么？', '影响范围？']);
+    expect(extractPartialQuestions('{"questions":[{"text":"包含\\"引号\\"的问题"}]}')).toEqual(['包含"引号"的问题']);
+  });
+
+  it('streams model deltas and parses the final turn from an SSE response', async () => {
+    const turn = { fieldUpdates: { actualBehavior: '页面坏了' }, observations: ['页面坏了'], reporterHypotheses: [], contradictions: [], possibleSensitiveData: false, executionTargetConfidence: 0, questions: [{ field: 'expectedBehavior', text: '预期是什么？', importance: 'high' }], readyForConfirmation: false };
+    const json = JSON.stringify(turn);
+    const events: IntakeProgressEvent[] = [];
+    const encoder = new TextEncoder();
+    const chunks = [
+      `data: ${JSON.stringify({ choices: [{ delta: { content: json.slice(0, 60) } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: json.slice(60) } }] })}\n\n`,
+      'data: [DONE]\n\n',
+    ];
+    let requestedStream = false;
+    const request: typeof fetch = async (_url, init) => {
+      requestedStream = Boolean(JSON.parse(String(init?.body)).stream);
+      const stream = new ReadableStream<Uint8Array>({ start(controller) { for (const chunk of chunks) controller.enqueue(encoder.encode(chunk)); controller.close(); } });
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+    const model = new OpenAICompatibleIntakeModel({ baseUrl: 'https://llm.example.test/v1', model: 'test', fetch: request });
+    const result = await model.complete({ currentDraft: {}, latestMessage: '页面坏了', onProgress: (event) => events.push(event) });
+    expect(requestedStream).toBe(true);
+    expect(result).toEqual(turn);
+    const deltas = events.filter((event) => event.type === 'model_delta');
+    expect(deltas.length).toBeGreaterThan(0);
+    const last = deltas.at(-1)!;
+    if (last.type === 'model_delta') {
+      expect(last.chars).toBe(json.length);
+      expect(last.partialQuestions).toEqual(['预期是什么？']);
+    }
+  });
+
+  it('falls back to a non-streamed response when the endpoint does not stream', async () => {
+    const turn = { fieldUpdates: {}, observations: [], reporterHypotheses: [], contradictions: [], possibleSensitiveData: false, executionTargetConfidence: 0, questions: [], readyForConfirmation: false };
+    const events: IntakeProgressEvent[] = [];
+    const request: typeof fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(turn) } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    const model = new OpenAICompatibleIntakeModel({ baseUrl: 'https://llm.example.test/v1', model: 'test', fetch: request });
+    await expect(model.complete({ currentDraft: {}, latestMessage: '页面坏了', onProgress: (event) => events.push(event) })).resolves.toEqual(turn);
+    expect(events).toEqual([]);
+  });
+
+  it('emits stage progress and forwards model deltas from IntakeService', async () => {
+    const turn: IntakeTurnResult = { fieldUpdates: {}, observations: [], reporterHypotheses: [], contradictions: [], possibleSensitiveData: false, executionTargetConfidence: 0, questions: [], readyForConfirmation: false };
+    const seenInputs: IntakeModelInput[] = [];
+    const model: IntakeModel = {
+      async complete(input) {
+        seenInputs.push(input);
+        input.onProgress?.({ type: 'model_delta', chars: 7, partialQuestions: ['预期是什么？'] });
+        return turn;
+      },
+    };
+    const events: IntakeProgressEvent[] = [];
+    await new IntakeService(model).processUserMessage({}, [], '页面坏了', [], undefined, (event) => events.push(event));
+    expect(events).toEqual([
+      { type: 'stage', stage: 'analyzing' },
+      { type: 'model_delta', chars: 7, partialQuestions: ['预期是什么？'] },
+    ]);
+    expect(seenInputs[0].onProgress).toBeInstanceOf(Function);
   });
 });

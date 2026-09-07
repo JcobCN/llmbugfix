@@ -64,6 +64,16 @@ const jsonBody = async (request) => {
 };
 const send = (response, status, body) => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, idempotency-key', 'access-control-allow-methods': 'GET,POST,PATCH,PUT,OPTIONS' }); response.end(JSON.stringify(body)); };
 const sendHtml = (response, body) => { response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-content-type-options': 'nosniff' }); response.end(body); };
+/** An in-flight message failure carrying the exact JSON error payload to return. */
+class MessageProcessingError extends Error {
+    status;
+    payload;
+    constructor(status, payload) {
+        super(String(payload.error ?? 'Message processing failed'));
+        this.status = status;
+        this.payload = payload;
+    }
+}
 const conversationResponse = (repo, conversation, document) => ({ ...conversation, messages: repo.listMessages(conversation.id), ...(document ? { document } : {}) });
 function updateConversation(repo, id, draft, completeness, status) {
     const candidate = repo.getConversation(id);
@@ -129,7 +139,8 @@ export class BugApiServer {
         let raw = '';
         const headers = {};
         const outgoing = { writeHead(code, values) { status = code; if (values)
-                Object.assign(headers, values); return this; }, end(chunk) { if (chunk)
+                Object.assign(headers, values); return this; }, write(chunk) { if (chunk)
+                raw += chunk.toString(); return true; }, flushHeaders() { }, once() { return this; }, end(chunk) { if (chunk)
                 raw += chunk.toString(); } };
         await this.handle(incoming, outgoing);
         let data = raw;
@@ -198,7 +209,7 @@ export class BugApiServer {
                     return;
                 }
             }
-            const conversationMatch = path.match(/^\/api\/(?:bugs\/)?conversations\/([^/]+)(?:\/(messages|draft|document|submit))?$/);
+            const conversationMatch = path.match(/^\/api\/(?:bugs\/)?conversations\/([^/]+)(?:\/(messages\/stream|messages|draft|document|submit))?$/);
             if (path === '/api/bugs/conversations' || path === '/api/conversations') {
                 if (method !== 'POST') {
                     send(response, 405, { error: 'Method not allowed' });
@@ -283,6 +294,93 @@ export class BugApiServer {
         const written = this.documentStore.write(id, content, base.revision);
         return this.documentStore.markReconciled(id, written.revision, written.sha256);
     }
+    /** Shared chat-message pipeline used by both the JSON and the SSE endpoints. */
+    async runMessagePipeline(conversation, body, content, document, emit) {
+        const id = conversation.id;
+        const recentMessages = this.repo.listMessages(id);
+        const editFields = [...(this.manualFields.get(id) ?? new Set()), ...(Array.isArray(body.userEditedFields) ? body.userEditedFields.map(String) : [])];
+        const onProgress = emit ? (event) => {
+            if (event.type === 'stage')
+                emit('stage', { stage: event.stage });
+            else
+                emit('progress', { chars: event.chars, questions: event.partialQuestions });
+        } : undefined;
+        let processed;
+        let processingDraft = conversation.draft;
+        let persisted = false;
+        // LLM/reconciliation work is intentionally outside the document lock. If the reporter
+        // edits the document while it is running, retry once from the newly-read snapshot;
+        // repeated edits return a conflict and the newest file is never overwritten.
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            processed = await this.intake.processUserMessage(processingDraft, recentMessages, content, editFields, document ? { currentDraft: processingDraft, markdown: document.content, documentRevision: document.revision, documentSha256: document.sha256, reconciledSha256: document.reconciledSha256, syncStatus: document.syncStatus } : undefined, onProgress);
+            if (processed.documentReconciliation?.conflicts.length) {
+                document = document ? this.markDocumentConflict(id, document) : document;
+                throw new MessageProcessingError(409, { error: 'DOCUMENT_RECONCILIATION_REQUIRED', code: 'DOCUMENT_RECONCILIATION_REQUIRED', conflicts: processed.documentReconciliation.conflicts, ...this.documentResponse(id, document) });
+            }
+            if (!document || processed.documentContent === undefined) {
+                persisted = true;
+                break;
+            }
+            try {
+                document = await this.persistGeneratedDocument(id, document, processed.documentContent);
+                persisted = true;
+                break;
+            }
+            catch (error) {
+                if (!(error instanceof DocumentRevisionConflictError) || attempt === 1) {
+                    const snapshot = error instanceof DocumentRevisionConflictError ? this.markDocumentConflict(id, error.snapshot) : document;
+                    throw new MessageProcessingError(409, { error: 'DOCUMENT_REVISION_CONFLICT', code: 'DOCUMENT_REVISION_CONFLICT', document: snapshot });
+                }
+                document = this.documentStore?.refresh(id);
+                if (!document)
+                    throw error;
+                processingDraft = conversation.draft;
+            }
+        }
+        if (!persisted)
+            throw new MessageProcessingError(409, { error: 'DOCUMENT_REVISION_CONFLICT', code: 'DOCUMENT_REVISION_CONFLICT', ...this.documentResponse(id, document) });
+        emit?.('stage', { stage: 'finalizing' });
+        this.repo.appendMessage({ conversationId: id, role: 'user', content, metadata: {} });
+        this.repo.appendMessage({ conversationId: id, role: 'assistant', content: processed.reply, metadata: { askedFields: processed.turn.questions.map((q) => q.field), turn: processed.turn } });
+        const updated = updateConversation(this.repo, id, processed.updatedDraft, processed.completeness, processed.completeness.readyForConfirmation ? 'awaiting_confirmation' : 'active');
+        return { ...conversationResponse(this.repo, updated, document), turn: processed.turn, document: document ?? undefined };
+    }
+    /** SSE variant of the chat pipeline: stage/progress/heartbeat events, then result or error. */
+    async streamMessagePipeline(conversation, body, content, document, request, response) {
+        const id = conversation.id;
+        response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, idempotency-key', 'access-control-allow-methods': 'GET,POST,PATCH,PUT,OPTIONS' });
+        if (typeof response.flushHeaders === 'function')
+            response.flushHeaders();
+        let closed = false;
+        const emit = (event, data) => {
+            if (closed || response.writableEnded || response.destroyed)
+                return;
+            try {
+                response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+            }
+            catch {
+                closed = true;
+            }
+        };
+        response.once('close', () => { closed = true; });
+        const startedAt = Date.now();
+        emit('stage', { stage: 'received' });
+        const heartbeat = setInterval(() => emit('heartbeat', { elapsedMs: Date.now() - startedAt }), 2_000);
+        try {
+            const payload = await this.runMessagePipeline(conversation, body, content, document, emit);
+            emit('result', payload);
+        }
+        catch (error) {
+            if (!(error instanceof MessageProcessingError))
+                this.logger.error(safeLogContext({ path: `/api/bugs/conversations/${id}/messages/stream`, method: 'POST', error: error instanceof Error ? error.message : String(error) }), 'request failed');
+            emit('error', error instanceof MessageProcessingError ? { status: error.status, ...error.payload } : { status: 500, error: error instanceof Error ? error.message : String(error) });
+        }
+        finally {
+            clearInterval(heartbeat);
+            if (!closed && !response.writableEnded)
+                response.end();
+        }
+    }
     async handleConversation(id, action, method, request, response) {
         const conversation = this.repo.getConversation(id);
         if (!conversation) {
@@ -309,50 +407,35 @@ export class BugApiServer {
                 send(response, 409, { error: 'DOCUMENT_REVISION_CONFLICT', code: 'DOCUMENT_REVISION_CONFLICT', document });
                 return;
             }
-            const recentMessages = this.repo.listMessages(id);
-            const editFields = [...(this.manualFields.get(id) ?? new Set()), ...(Array.isArray(body.userEditedFields) ? body.userEditedFields.map(String) : [])];
-            let processed;
-            let processingDraft = conversation.draft;
-            let persisted = false;
-            // LLM/reconciliation work is intentionally outside the document lock. If the reporter
-            // edits the document while it is running, retry once from the newly-read snapshot;
-            // repeated edits return a conflict and the newest file is never overwritten.
-            for (let attempt = 0; attempt < 2; attempt += 1) {
-                processed = await this.intake.processUserMessage(processingDraft, recentMessages, content, editFields, document ? { currentDraft: processingDraft, markdown: document.content, documentRevision: document.revision, documentSha256: document.sha256, reconciledSha256: document.reconciledSha256, syncStatus: document.syncStatus } : undefined);
-                if (processed.documentReconciliation?.conflicts.length) {
-                    document = document ? this.markDocumentConflict(id, document) : document;
-                    send(response, 409, { error: 'DOCUMENT_RECONCILIATION_REQUIRED', code: 'DOCUMENT_RECONCILIATION_REQUIRED', conflicts: processed.documentReconciliation.conflicts, ...this.documentResponse(id, document) });
+            try {
+                send(response, 200, await this.runMessagePipeline(conversation, body, content, document));
+            }
+            catch (error) {
+                if (error instanceof MessageProcessingError) {
+                    send(response, error.status, error.payload);
                     return;
                 }
-                if (!document || processed.documentContent === undefined) {
-                    persisted = true;
-                    break;
-                }
-                try {
-                    document = await this.persistGeneratedDocument(id, document, processed.documentContent);
-                    persisted = true;
-                    break;
-                }
-                catch (error) {
-                    if (!(error instanceof DocumentRevisionConflictError) || attempt === 1) {
-                        const snapshot = error instanceof DocumentRevisionConflictError ? this.markDocumentConflict(id, error.snapshot) : document;
-                        send(response, 409, { error: 'DOCUMENT_REVISION_CONFLICT', code: 'DOCUMENT_REVISION_CONFLICT', document: snapshot });
-                        return;
-                    }
-                    document = this.documentStore?.refresh(id);
-                    if (!document)
-                        throw error;
-                    processingDraft = conversation.draft;
-                }
+                throw error;
             }
-            if (!persisted) {
-                send(response, 409, { error: 'DOCUMENT_REVISION_CONFLICT', code: 'DOCUMENT_REVISION_CONFLICT', ...this.documentResponse(id, document) });
+            return;
+        }
+        if (action === 'messages/stream' && method === 'POST') {
+            const body = await jsonBody(request);
+            const content = typeof body.content === 'string' ? body.content.trim() : '';
+            if (!content) {
+                send(response, 400, { error: 'content is required' });
                 return;
             }
-            this.repo.appendMessage({ conversationId: id, role: 'user', content, metadata: {} });
-            this.repo.appendMessage({ conversationId: id, role: 'assistant', content: processed.reply, metadata: { askedFields: processed.turn.questions.map((q) => q.field), turn: processed.turn } });
-            const updated = updateConversation(this.repo, id, processed.updatedDraft, processed.completeness, processed.completeness.readyForConfirmation ? 'awaiting_confirmation' : 'active');
-            send(response, 200, { ...conversationResponse(this.repo, updated, document), turn: processed.turn, document: document ?? undefined });
+            if (conversation.status === 'submitted') {
+                send(response, 409, { error: 'Conversation has already been submitted' });
+                return;
+            }
+            let document = this.documentStore?.refresh(id);
+            if (document && body.documentRevision !== undefined && (!Number.isInteger(body.documentRevision) || Number(body.documentRevision) !== document.revision)) {
+                send(response, 409, { error: 'DOCUMENT_REVISION_CONFLICT', code: 'DOCUMENT_REVISION_CONFLICT', document });
+                return;
+            }
+            await this.streamMessagePipeline(conversation, body, content, document, request, response);
             return;
         }
         if (action === 'draft' && method === 'GET') {

@@ -12,18 +12,20 @@ type FakeElement = {
   innerHTML: string;
   scrollTop: number;
   scrollHeight: number;
+  removed: boolean;
   listeners: Record<string, () => void>;
   onclick?: () => void;
   onkeydown?: (event: { key: string; ctrlKey: boolean; metaKey: boolean; preventDefault(): void }) => void;
   addEventListener(type: string, listener: () => void): void;
   focus(): void;
+  remove(): void;
 };
 
 const clientElementIds = [
   'error', 'document-save-state', 'document-sync-state', 'message', 'send', 'markdown-editor',
   'continue', 'submit', 'reload-server-document', 'state', 'messages', 'score', 'missing',
   'retry-init', 'success-card', 'bug-key', 'bug-key-link', 'bug-detail-link', 'submitted-status',
-  'submitted-score', 'submitted-explanation',
+  'submitted-score', 'submitted-explanation', 'typing-status', 'typing-content', 'pending-user', 'pending-typing',
 ];
 
 function executeIntakeClient(responses: Array<unknown | Error>) {
@@ -31,18 +33,20 @@ function executeIntakeClient(responses: Array<unknown | Error>) {
   for (const id of clientElementIds) {
     const element: FakeElement = {
       textContent: '', hidden: ['retry-init', 'success-card', 'reload-server-document'].includes(id), disabled: false,
-      readOnly: false, value: '', href: '', className: '', innerHTML: '', scrollTop: 0, scrollHeight: 0,
+      readOnly: false, value: '', href: '', className: '', innerHTML: '', scrollTop: 0, scrollHeight: 0, removed: false,
       listeners: {},
-      addEventListener(type, listener) { this.listeners[type] = listener; },
+      addEventListener(type: string, listener: () => void) { this.listeners[type] = listener; },
       focus() {},
+      remove() { this.removed = true; },
     };
     elements.set(id, element);
   }
   let responseIndex = 0;
-  const fetchMock = vi.fn(async () => {
+  const fetchMock = vi.fn(async (...args: unknown[]) => {
     const value = responses[responseIndex++];
     if (value instanceof Error) throw value;
-    return { ok: true, status: 200, json: async () => value };
+    if (value && typeof value === 'object' && 'ok' in (value as Record<string, unknown>)) return value;
+    return { ok: true, status: 200, json: async () => value, args };
   });
   const confirmMock = vi.fn(() => true);
   const script = renderIndexHtml().match(/<script>([\s\S]*)<\/script>/)?.[1];
@@ -172,5 +176,83 @@ describe('conversational intake page', () => {
     elements.get('markdown-editor')?.listeners.input?.();
     await Promise.resolve();
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('streams the chat reply with live progress and renders the final result', async () => {
+    const created = { id: 'conversation-1', messages: [{ role: 'assistant', content: '请直接描述你遇到的问题。' }], completeness: { score: 0 }, document: { content: '# Bug', revision: 1, syncStatus: 'synced' } };
+    const finalConversation = {
+      id: 'conversation-1',
+      messages: [
+        { role: 'assistant', content: '请直接描述你遇到的问题。' },
+        { role: 'user', content: '页面坏了' },
+        { role: 'assistant', content: '1. 预期是什么？' },
+      ],
+      completeness: { score: 55 },
+      document: { content: '# 页面坏了', revision: 2, syncStatus: 'synced' },
+    };
+    const ssePayload = [
+      'event: stage\ndata: {"stage":"received"}',
+      'event: stage\ndata: {"stage":"analyzing"}',
+      'event: progress\ndata: {"chars":12,"questions":["预期是什么？"]}',
+      'event: heartbeat\ndata: {"elapsedMs":2000}',
+      'event: result\ndata: ' + JSON.stringify(finalConversation),
+    ].join('\n\n') + '\n\n';
+    const encoder = new TextEncoder();
+    const streamResponse = {
+      ok: true,
+      status: 200,
+      headers: { get: (name: string) => (name === 'content-type' ? 'text/event-stream' : '') },
+      body: {
+        getReader: () => {
+          let sent = false;
+          return { read: async () => { if (sent) return { done: true, value: undefined }; sent = true; return { done: false, value: encoder.encode(ssePayload) }; } };
+        },
+      },
+    };
+    const { elements, fetchMock } = executeIntakeClient([created, streamResponse]);
+    await vi.waitFor(() => expect(elements.get('state')?.textContent).toBe('可继续补充'));
+    elements.get('message')!.value = '页面坏了';
+    elements.get('send')?.onclick?.();
+    await vi.waitFor(() => expect(elements.get('score')?.textContent).toBe('55'));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/bugs/conversations/conversation-1/messages/stream');
+    const messages = elements.get('messages')!.innerHTML;
+    expect(messages).toContain('页面坏了');
+    expect(messages).toContain('1. 预期是什么？');
+    expect(messages).not.toContain('pending-typing');
+    expect(elements.get('typing-status')!.textContent).toContain('正在分析');
+    expect(elements.get('typing-content')!.textContent).toContain('预期是什么？');
+    expect(elements.get('message')!.value).toBe('');
+    expect(elements.get('error')!.hidden).toBe(true);
+  });
+
+  it('keeps the message in the composer and clears pending bubbles when the stream fails', async () => {
+    const created = { id: 'conversation-1', messages: [], completeness: { score: 0 }, document: { content: '# Bug', revision: 1, syncStatus: 'synced' } };
+    const ssePayload = [
+      'event: stage\ndata: {"stage":"received"}',
+      'event: error\ndata: {"status":500,"error":"Intake LLM exploded"}',
+    ].join('\n\n') + '\n\n';
+    const encoder = new TextEncoder();
+    const streamResponse = {
+      ok: true,
+      status: 200,
+      headers: { get: (name: string) => (name === 'content-type' ? 'text/event-stream' : '') },
+      body: {
+        getReader: () => {
+          let sent = false;
+          return { read: async () => { if (sent) return { done: true, value: undefined }; sent = true; return { done: false, value: encoder.encode(ssePayload) }; } };
+        },
+      },
+    };
+    const { elements } = executeIntakeClient([created, streamResponse]);
+    await vi.waitFor(() => expect(elements.get('state')?.textContent).toBe('可继续补充'));
+    elements.get('message')!.value = '页面坏了';
+    elements.get('send')?.onclick?.();
+    await vi.waitFor(() => expect(elements.get('error')!.hidden).toBe(false));
+    expect(elements.get('error')!.textContent).toContain('Intake LLM exploded');
+    expect(elements.get('message')!.value).toBe('页面坏了');
+    expect(elements.get('pending-typing')!.removed).toBe(true);
+    expect(elements.get('pending-user')!.removed).toBe(true);
+    expect(elements.get('state')?.textContent).toBe('可继续补充');
   });
 });

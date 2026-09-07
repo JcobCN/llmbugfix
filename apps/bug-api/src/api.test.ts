@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { newId } from '@llmbugfix/shared';
 import { openDatabase, SQLiteBugRepository } from '@llmbugfix/bug-repository';
-import { FakeIntakeModel, IntakeService, type DocumentReconciliationInput, type IntakeModelInput, type IntakeTurnResult } from '@llmbugfix/intake-agent';
+import { FakeIntakeModel, IntakeService, type DocumentReconciliationInput, type IntakeModel, type IntakeModelInput, type IntakeTurnResult } from '@llmbugfix/intake-agent';
 import { BugApiServer } from './index.js';
 
 describe('Bug API routes', () => {
@@ -172,5 +172,51 @@ describe('Bug API routes', () => {
     const secondEdit = await concurrentServer.inject<{ revision: number }>({ method: 'PUT', url: `/api/bugs/conversations/${created.data.id}/document`, body: { content: `${created.data.document.content}\n\n## User Notes\nsecond concurrent edit must survive`, baseRevision: firstEdit.data.revision } });
     releaseSecond(); const result = await request;
     expect(calls).toBe(2); expect(result.status, result.raw).toBe(409); expect(result.data.code).toBe('DOCUMENT_REVISION_CONFLICT'); expect(result.data.document.revision).toBe(secondEdit.data.revision); expect(result.data.document.syncStatus).toBe('conflict'); expect(result.data.document.content).toContain('second concurrent edit must survive');
+  });
+
+  it('streams chat progress over SSE with stage, progress and result events', async () => {
+    const turn: IntakeTurnResult = { fieldUpdates: { actualBehavior: '页面坏了' }, observations: [], reporterHypotheses: [], contradictions: [], possibleSensitiveData: false, executionTargetConfidence: 0, questions: [{ field: 'expectedBehavior', text: '预期是什么？', importance: 'high' }], readyForConfirmation: false };
+    const progressModel: IntakeModel = {
+      async complete(input: IntakeModelInput): Promise<IntakeTurnResult> {
+        input.onProgress?.({ type: 'model_delta', chars: 6, partialQuestions: ['预期是什么？'] });
+        return turn;
+      },
+    };
+    const streamingServer = new BugApiServer({}, new SQLiteBugRepository(db), new IntakeService(progressModel));
+    const created = await streamingServer.inject<{ id: string }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
+    const streamed = await streamingServer.inject<{ messages: Array<{ role: string }>; turn: { questions: unknown[] } }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/messages/stream`, body: { content: '页面坏了' } });
+    expect(streamed.status, streamed.raw).toBe(200);
+    expect(streamed.headers['content-type']).toContain('text/event-stream');
+    const blocks = streamed.raw.split('\n\n').filter(Boolean);
+    const names = blocks.map((block) => block.match(/^event: (.+)$/m)?.[1]);
+    expect(names).toContain('stage');
+    expect(names).toContain('progress');
+    expect(names).toContain('result');
+    const stages = blocks.filter((block) => block.startsWith('event: stage')).map((block) => JSON.parse(block.match(/^data: (.+)$/m)![1]).stage);
+    expect(stages).toEqual(['received', 'analyzing', 'finalizing']);
+    const progress = JSON.parse(blocks.find((block) => block.startsWith('event: progress'))!.match(/^data: (.+)$/m)![1]);
+    expect(progress.questions).toEqual(['预期是什么？']);
+    const result = JSON.parse(blocks.find((block) => block.startsWith('event: result'))!.match(/^data: (.+)$/m)![1]);
+    expect(result.messages.map((message: { role: string }) => message.role)).toEqual(['assistant', 'user', 'assistant']);
+    expect(result.turn.questions[0].text).toBe('预期是什么？');
+    // The JSON endpoint keeps its exact contract alongside the stream.
+    const json = await streamingServer.inject<{ messages: Array<{ role: string }> }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/messages`, body: { content: '再补充一句' } });
+    expect(json.status, json.raw).toBe(200);
+    expect(json.data.messages).toHaveLength(5);
+  });
+
+  it('reports stream pipeline failures as SSE error events with a status', async () => {
+    const failingModel: IntakeModel = { async complete(): Promise<IntakeTurnResult> { throw new Error('Intake LLM exploded'); } };
+    const failingServer = new BugApiServer({}, new SQLiteBugRepository(db), new IntakeService(failingModel));
+    const created = await failingServer.inject<{ id: string }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
+    const missing = await failingServer.inject({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/messages/stream`, body: {} });
+    expect(missing.status).toBe(400);
+    const streamed = await failingServer.inject<{ error: string; status: number }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/messages/stream`, body: { content: '页面坏了' } });
+    expect(streamed.status).toBe(200);
+    const errorBlock = streamed.raw.split('\n\n').find((block) => block.startsWith('event: error'));
+    expect(errorBlock).toBeDefined();
+    const payload = JSON.parse(errorBlock!.match(/^data: (.+)$/m)![1]);
+    expect(payload.status).toBe(500);
+    expect(payload.error).toContain('Intake LLM exploded');
   });
 });
