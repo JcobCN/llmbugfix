@@ -17,13 +17,17 @@ import {
 } from '@llmbugfix/validator';
 import {
   createAgentSession,
+  createBashToolDefinition,
+  createEditToolDefinition,
   createExtensionRuntime,
+  createWriteToolDefinition,
   ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSession,
   type CreateAgentSessionOptions,
   type ResourceLoader,
+  type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { z } from 'zod';
 
@@ -106,6 +110,8 @@ export interface PiSessionFactoryOptions {
   sessionManager: SessionManager;
   settingsManager: SettingsManager;
   agentDir: string;
+  /** Extra tool definitions that replace the built-in tools with the same name. */
+  customTools?: ToolDefinition[];
 }
 
 export type PiSessionFactory = (options: PiSessionFactoryOptions) => Promise<{ session: PiSession }>;
@@ -131,6 +137,16 @@ export interface PiAgentRunnerOptions {
   requireSandbox?: boolean;
   /** Name/path of an externally enforced sandbox profile or launcher. */
   sandboxProfile?: string;
+  /**
+   * Explicit bash executable used by the fixer bash tool, typically a sandbox
+   * wrapper script. The wrapper receives `-c <command>` exactly like bash.
+   */
+  bashShellPath?: string;
+  /**
+   * Confine fixer file-mutating tools (edit/write) to the worktree directory.
+   * Bash confinement is the wrapper's responsibility (see bashShellPath).
+   */
+  confineWorkspace?: boolean;
 }
 
 export class PiAgentRunnerTimeoutError extends Error {
@@ -239,6 +255,8 @@ export class PiAgentRunner implements AgentRunner {
   private readonly sessionFactory: PiSessionFactory;
   private readonly requireSandbox: boolean;
   private readonly sandboxProfile?: string;
+  private readonly bashShellPath?: string;
+  private readonly confineWorkspace: boolean;
   private runtimePromise?: Promise<PiModelRuntime>;
 
   constructor(options: PiAgentRunnerOptions = {}) {
@@ -260,12 +278,43 @@ export class PiAgentRunner implements AgentRunner {
       modelRuntime: sessionOptions.modelRuntime as ModelRuntime,
       resourceLoader: sessionOptions.resourceLoader,
       tools: [...sessionOptions.tools],
+      customTools: sessionOptions.customTools,
       sessionManager: sessionOptions.sessionManager,
       settingsManager: sessionOptions.settingsManager,
       thinkingLevel: 'off',
     }).then((result) => ({ session: result.session })));
     this.requireSandbox = options.requireSandbox ?? false;
     this.sandboxProfile = options.sandboxProfile ?? process.env.PI_SANDBOX_PROFILE;
+    this.bashShellPath = options.bashShellPath?.trim() || undefined;
+    this.confineWorkspace = options.confineWorkspace ?? false;
+  }
+
+  /**
+   * Build fixer tool definitions that enforce workspace confinement:
+   * - bash runs through an explicit sandbox wrapper when bashShellPath is set;
+   * - edit/write reject any path that resolves outside the worktree.
+   * Definitions returned here shadow Pi's built-in tools with the same name.
+   */
+  private fixerConfinedTools(cwd: string): ToolDefinition[] {
+    // Pi's concrete tool definitions are generic over their schema; the custom
+    // tools boundary is the unparameterized ToolDefinition, so the variance is
+    // bridged with an explicit cast at this single point.
+    const tools: ToolDefinition[] = [];
+    if (this.bashShellPath) tools.push(createBashToolDefinition(cwd, { shellPath: this.bashShellPath }) as unknown as ToolDefinition);
+    if (this.confineWorkspace) {
+      const confined = (definition: ToolDefinition): ToolDefinition => ({
+        ...definition,
+        execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+          const requested = (params as { path?: unknown } | undefined)?.path;
+          if (typeof requested !== 'string' || !requested.trim()) throw new Error('A file path is required');
+          const resolved = path.resolve(cwd, requested);
+          if (resolved !== cwd && !resolved.startsWith(`${cwd}${path.sep}`)) throw new Error(`Path escapes the worktree sandbox: ${requested}`);
+          return definition.execute(toolCallId, params, signal, onUpdate, ctx);
+        },
+      });
+      tools.push(confined(createEditToolDefinition(cwd) as unknown as ToolDefinition), confined(createWriteToolDefinition(cwd) as unknown as ToolDefinition));
+    }
+    return tools;
   }
 
   private async getRuntime(): Promise<PiModelRuntime> {
@@ -313,11 +362,13 @@ export class PiAgentRunner implements AgentRunner {
     const model = runtime.getModel(PROVIDER_ID, this.modelName);
     if (!model) throw new Error(`Pi model is unavailable: ${PROVIDER_ID}/${this.modelName}`);
     const tools = role === 'fixer' ? FIXER_TOOLS : REVIEWER_TOOLS;
+    const customTools = role === 'fixer' ? this.fixerConfinedTools(cwd) : [];
     const sessionResult = await this.sessionFactory({
       cwd,
       model,
       modelRuntime: runtime,
       tools,
+      ...(customTools.length ? { customTools } : {}),
       resourceLoader: isolatedResourceLoader(role),
       sessionManager: SessionManager.inMemory(cwd),
       settingsManager: SettingsManager.inMemory({

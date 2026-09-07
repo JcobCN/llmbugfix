@@ -1,0 +1,51 @@
+#!/bin/bash
+# Pi fixer bash sandbox wrapper.
+#
+# Invoked by the fixer bash tool as: fixer-bash -c "<command>"  (cwd = worktree).
+# It runs the command inside a private mount namespace where the whole
+# PI_SANDBOX_RO_ROOT tree (normally DATA_ROOT, a dedicated bind mount) is
+# read-only, except the current worktree and its main git repository which are
+# re-bound read-write, then drops privileges to PI_SANDBOX_UID/GID.
+#
+# Requirements: CAP_SYS_ADMIN inside a container (see --cap-add SYS_ADMIN,
+# --security-opt apparmor=unconfined). Refuses to run when RO_ROOT is not a
+# dedicated mount point, so a misconfigured host cannot have its root
+# filesystem remounted read-only by accident.
+set -euo pipefail
+
+if [ "${1:-}" = "--inner" ]; then
+  shift
+  main_repo="${1:-}"
+  shift
+  workdir="$(pwd -P)"
+  # Refuse unless the confinement root is its own mount (container bind mount).
+  if ! awk -v target="$PI_SANDBOX_RO_ROOT" '$5 == target { found = 1 } END { exit !found }' /proc/self/mountinfo; then
+    echo "fixer-bash: refusing to run: $PI_SANDBOX_RO_ROOT is not a dedicated mount point" >&2
+    exit 1
+  fi
+  mount -o remount,bind,ro "$PI_SANDBOX_RO_ROOT"
+  mount --bind "$workdir" "$workdir"
+  mount -o remount,bind,rw "$workdir"
+  if [ -n "$main_repo" ] && [ "$main_repo" != "$workdir" ]; then
+    mount --bind "$main_repo" "$main_repo"
+    mount -o remount,bind,rw "$main_repo"
+  fi
+  # Unprivileged HOME so git does not try to read root's configuration.
+  home_dir="/tmp/fixer-home-$$"
+  mkdir -p "$home_dir" && chmod 700 "$home_dir"
+  export HOME="$home_dir"
+  exec setpriv --reuid="$PI_SANDBOX_UID" --regid="$PI_SANDBOX_GID" --clear-groups /bin/bash "$@"
+fi
+
+workdir="$(pwd -P)"
+main_repo=""
+if [ -f "$workdir/.git" ]; then
+  gitdir="$(sed -n 's/^gitdir: //p' "$workdir/.git" 2>/dev/null || true)"
+  case "$gitdir" in
+    /*) main_repo="$(cd "$gitdir/../../.." 2>/dev/null && pwd -P || true)" ;;
+  esac
+fi
+: "${PI_SANDBOX_RO_ROOT:?PI_SANDBOX_RO_ROOT is not set}"
+: "${PI_SANDBOX_UID:=1000}"
+: "${PI_SANDBOX_GID:=1000}"
+exec unshare --mount --propagation unchanged /bin/bash "$(realpath "$0")" --inner "$main_repo" "$@"

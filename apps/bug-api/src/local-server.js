@@ -143,6 +143,8 @@ if (llmEnabled) {
             reviewerTimeoutMs: positiveInteger(process.env.REVIEWER_TIMEOUT_MS, 900_000, 'REVIEWER_TIMEOUT_MS'),
             requireSandbox: true,
             sandboxProfile,
+            bashShellPath: process.env.PI_BASH_SHELL?.trim() || undefined,
+            confineWorkspace: process.env.PI_CONFINE_WORKSPACE === '1',
         });
         orchestrator = new Orchestrator(config, repo, queue, environmentResolver, repoManager, environmentRunner, agentRunner, new Validator(commandRunner), { dryRun: process.env.DRY_RUN !== 'false' });
     }

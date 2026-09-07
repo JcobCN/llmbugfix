@@ -131,4 +131,29 @@ describe('PiAgentRunner', () => {
     const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, requireSandbox: true, sessionFactory: async () => ({ session: sessionReturning(JSON.stringify(fixResult)) }) });
     await expect(runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' })).rejects.toThrow(/sandbox/i);
   });
+
+  it('passes confined fixer tools to the session and rejects paths outside the worktree', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    const sessionOptions: PiSessionFactoryOptions[] = [];
+    const runner = new PiAgentRunner({
+      endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime,
+      bashShellPath: '/opt/fixer-bash', confineWorkspace: true,
+      sessionFactory: async (options) => { sessionOptions.push(options); return { session: sessionReturning(JSON.stringify(fixResult)) }; },
+    });
+    await runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' });
+    const tools = sessionOptions[0].customTools ?? [];
+    expect(tools.map((tool) => tool.name).sort()).toEqual(['bash', 'edit', 'write']);
+    const edit = tools.find((tool) => tool.name === 'edit');
+    expect(edit).toBeTruthy();
+    await expect(edit!.execute('t1', { path: '../escape.txt', edits: [] }, undefined, undefined, {} as never)).rejects.toThrow(/escapes the worktree sandbox/);
+    await expect(edit!.execute('t2', { path: '/etc/passwd', edits: [] }, undefined, undefined, {} as never)).rejects.toThrow(/escapes the worktree sandbox/);
+  });
+
+  it('does not add confined tools when no sandbox options are set', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    const sessionOptions: PiSessionFactoryOptions[] = [];
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, sessionFactory: async (options) => { sessionOptions.push(options); return { session: sessionReturning(JSON.stringify(fixResult)) }; } });
+    await runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' });
+    expect(sessionOptions[0].customTools).toBeUndefined();
+  });
 });
