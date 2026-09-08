@@ -67,6 +67,40 @@
 
 只有在 `DRY_RUN` 或独立测试数据库、队列和环境配置已确认的情况下，才测试“确认提交”。该场景应额外验证成功卡片、Bug Key 链接、Dashboard 条目和没有意外启动真实修复任务。
 
+## Repair Worker 全流程测试（含提交）
+
+测试目标：验证从对话、提交到 Pi fixer 修复、reviewer 评审、git push 的完整链路。在 `kfjllm` 上通过 API 执行（等价于 Web 页面操作）。
+
+### 前置配置
+
+1. `.env` 关键项：
+
+   ```bash
+   DRY_RUN=true                 # 首轮验证保持 true；push 测试才改 false
+   GIT_ALLOWED_HOSTS=localhost  # push 测试时需加入目标 Git 仓库主机
+   PI_SANDBOX_PROFILE=local-dev
+   ```
+
+2. 仓库准备：若目标仓库已在 `data/repositories/<checkout-id>` 存在（origin 匹配），提交时复用，不会重新 clone。checkout-id 规则为 `remote-` + sha256(`target\0repoUrl`) 前 16 位。
+
+### 执行步骤
+
+1. 创建会话并多轮对话，补齐信息直到 `readyForConfirmation: true`（完整度需 ≥ 65，否则提交后停在 `NEEDS_INFO`，不进队列）。信息要点：问题描述、复现步骤、实际/期望行为、环境（浏览器/系统）、影响范围、仓库 URL、默认分支。
+2. 提交：`POST /api/bugs/conversations/:id/submit`，body `{"confirm":true}`。响应含 `bugKey`（如 `BUG-000003`）。
+3. 轮询 `GET /api/bugs` 观察 bug 状态流转：`QUEUED → PREPARING_ENV → FIXING → VALIDATING → REVIEWING → FIX_READY`（DRY_RUN）或 `→ PUSHING → READY_FOR_HUMAN_REVIEW`（真实 push）。fixer 最长 45 分钟，每 60s 轮询一次即可。
+4. 验证产物 `data/agent-results/<BUG-KEY>/`：`bug.json`、`fix-task.json`、`environment-run.json`、`agent-result.json`、`validation.json`、`diff.patch`、`review.json`、`git-result.json`、`pipeline.json`（0600 权限）。
+5. 验证 `review.json` 的 verdict 为 `approve`；`diff.patch` 内容与报告的 `filesChanged` 对应。
+6. 失败排查：`logs/dev.log` 中 `intake-llm` / `pi-agent` 记录了每次 LLM 交互原文；格式失败会留 `agent-raw-output.txt`，且 diff 非空时保留 worktree 供人工挽救。
+7. 重试：`POST /api/bugs/<BUG-KEY>/retry`（仅接受终态失败），会重建 worktree 重跑。
+
+### Push 测试（DRY_RUN=false）
+
+1. `.env` 设置 `DRY_RUN=false`，并把目标仓库主机加入 `GIT_ALLOWED_HOSTS`（如 `GIT_ALLOWED_HOSTS=localhost,172.29.100.126`），重启 dev server。
+2. 提交新 Bug 并等待 `READY_FOR_HUMAN_REVIEW`。
+3. 验证远端仓库出现 `ai/<BUG-KEY>-<slug>` 分支，commit message 为 `fix(<BUG-KEY>): <标题>`；`git-result.json` 的 `pushed: true` 且有 commitSha。
+4. 安全边界：push 只允许 `ai/*` 分支，禁推 main/master/develop；host 不在白名单会 fail-safe 拒绝。
+5. 测试后建议删除远端测试分支，并将 `DRY_RUN` 恢复为 `true`。
+
 ## 2026-09-06 已执行记录
 
 对 `http://kfjllm:8033` 的实际 Firefox BiDi 测试已通过：
@@ -76,3 +110,11 @@
 - 完整度更新为 `65`，Markdown 更新为结构化报告，状态为 `synced`；
 - Dashboard 客户端数据加载成功，显示 Bug 表格且没有错误；
 - 未点击“确认提交”，以避免在已启用 repair worker 的测试机上创建真实修复任务。
+
+## 2026-09-08 已执行记录（repair worker，DRY_RUN）
+
+- 3 轮对话（store tab 切换无反应）→ 提交 → `BUG-000002` 入队；
+- 完整度不足时正确停在 `NEEDS_INFO`（BUG-000001，score 61）；补齐后（score 70）提交进队列；
+- 修复链路走通：FIXING → VALIDATING → REVIEWING → `FIX_READY`，reviewer approve（regressionRisk: low）；
+- fixer/reviewer 首次输出夹带散文，回喂校验错误后第二次通过（纠错回路生效）；
+- 九件套产物齐全；`DRY_RUN` 下无 commit/push，远端仓库无改动。

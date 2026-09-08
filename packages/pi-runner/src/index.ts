@@ -239,6 +239,30 @@ function asJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+/**
+ * Compact, bounded parameter summary for tool-call audit logs. Only the keys
+ * that identify what the agent touched are kept, so the log stays readable
+ * and never carries whole file bodies.
+ */
+function summarizeToolParams(tool: string, params: unknown): Record<string, string | number> {
+  const value = (params ?? {}) as Record<string, unknown>;
+  const clip = (input: string, max = 300): string => (input.length > max ? `${input.slice(0, max)}…` : input);
+  if (tool === 'bash') {
+    const command = typeof value.command === 'string' ? value.command : '';
+    return { command: clip(command, 500) };
+  }
+  if (typeof value.path === 'string') {
+    const summary: Record<string, string | number> = { path: value.path };
+    if (tool === 'read') { if (typeof value.offset === 'number') summary.offset = value.offset; if (typeof value.limit === 'number') summary.limit = value.limit; }
+    if (tool === 'edit' && Array.isArray(value.edits)) summary.edits = value.edits.length;
+    if (tool === 'write' && typeof value.content === 'string') summary.bytes = value.content.length;
+    return summary;
+  }
+  if (tool === 'grep' && typeof value.pattern === 'string') return { pattern: clip(value.pattern), ...(typeof value.path === 'string' ? { path: value.path } : {}) };
+  if (tool === 'find') { if (typeof value.pattern === 'string') return { pattern: clip(value.pattern) }; }
+  return { params: clip(JSON.stringify(value)) };
+}
+
 function fixerPrompt(input: FixerInput, safety: string): string {
   return [
     'Fix the reported bug in the current repository. You own the coding loop: inspect, reproduce when useful, edit files, and run appropriate validation.',
@@ -309,30 +333,46 @@ export class PiAgentRunner implements AgentRunner {
   }
 
   /**
-   * Build fixer tool definitions that enforce workspace confinement:
+   * Build fixer tool definitions that shadow Pi's built-ins with audit
+   * logging and optional workspace confinement:
+   * - every tool call is logged (tool name + parameter summary) so operators
+   *   can follow what the agent is doing in real time via the dev log;
    * - bash runs through an explicit sandbox wrapper when bashShellPath is set;
-   * - edit/write reject any path that resolves outside the worktree.
-   * Definitions returned here shadow Pi's built-in tools with the same name.
+   * - edit/write reject any path that resolves outside the worktree when
+   *   confineWorkspace is set.
    */
   private fixerConfinedTools(cwd: string): ToolDefinition[] {
     // Pi's concrete tool definitions are generic over their schema; the custom
     // tools boundary is the unparameterized ToolDefinition, so the variance is
     // bridged with an explicit cast at this single point.
-    const tools: ToolDefinition[] = [];
-    if (this.bashShellPath) tools.push(createBashToolDefinition(cwd, { shellPath: this.bashShellPath }) as unknown as ToolDefinition);
-    if (this.confineWorkspace) {
-      const confined = (definition: ToolDefinition): ToolDefinition => ({
-        ...definition,
-        execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    const audited = (name: string, definition: ToolDefinition, confinePaths: boolean): ToolDefinition => ({
+      ...definition,
+      execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+        const summary = summarizeToolParams(name, params);
+        this.logger?.info({ role: 'fixer', tool: name, ...summary }, 'pi fixer tool call');
+        if (confinePaths) {
           const requested = (params as { path?: unknown } | undefined)?.path;
           if (typeof requested !== 'string' || !requested.trim()) throw new Error('A file path is required');
           const resolved = path.resolve(cwd, requested);
           if (resolved !== cwd && !resolved.startsWith(`${cwd}${path.sep}`)) throw new Error(`Path escapes the worktree sandbox: ${requested}`);
-          return definition.execute(toolCallId, params, signal, onUpdate, ctx);
-        },
-      });
-      tools.push(confined(createEditToolDefinition(cwd) as unknown as ToolDefinition), confined(createWriteToolDefinition(cwd) as unknown as ToolDefinition));
-    }
+        }
+        try {
+          return await definition.execute(toolCallId, params, signal, onUpdate, ctx);
+        } catch (error) {
+          this.logger?.error({ role: 'fixer', tool: name, error: error instanceof Error ? error.message : String(error) }, 'pi fixer tool call failed');
+          throw error;
+        }
+      },
+    });
+    const tools: ToolDefinition[] = [];
+    const bashDefinition: ToolDefinition | undefined = this.bashShellPath ? createBashToolDefinition(cwd, { shellPath: this.bashShellPath }) as unknown as ToolDefinition : undefined;
+    const editDefinition = createEditToolDefinition(cwd) as unknown as ToolDefinition;
+    const writeDefinition = createWriteToolDefinition(cwd) as unknown as ToolDefinition;
+    // The bash tool must stay audited even without a sandbox wrapper so the
+    // log always shows which commands the fixer executes.
+    if (bashDefinition) tools.push(audited('bash', bashDefinition, false));
+    if (this.logger) tools.push(audited('edit', editDefinition, this.confineWorkspace), audited('write', writeDefinition, this.confineWorkspace));
+    else if (this.confineWorkspace) tools.push(audited('edit', editDefinition, true), audited('write', writeDefinition, true));
     return tools;
   }
 
