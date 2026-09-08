@@ -61,6 +61,101 @@ describe('Intake Agent & Service', () => {
     });
   });
 
+  it('preserves both project name and repository when reconciling the managed Environment section', () => {
+    const markdown = [
+      '# Store tab issue',
+      '',
+      '## Environment',
+      '- Project: app-honourbell-store',
+      '- Repository: http://172.29.100.126/codigger-llm/app-honourbell-store.git',
+      '- Base Branch: llm-bugfix',
+    ].join('\n');
+    const result = reconcileBugDocument({ currentDraft: {}, markdown, documentRevision: 1, documentSha256: sha256Document(markdown) });
+    expect(result.fieldUpdates.environmentProfileId).toBeUndefined();
+    expect(result.fieldUpdates.environmentProfile).toMatchObject({
+      name: 'app-honourbell-store',
+      repositoryUrl: 'http://172.29.100.126/codigger-llm/app-honourbell-store.git',
+      defaultBranch: 'llm-bugfix',
+    });
+  });
+
+  it('extracts a standalone Chinese expected-behavior marker', async () => {
+    const result = await new IntakeService(new FakeIntakeModel()).processTurn({}, [], '点击保存后页面没反应，应该显示保存成功。');
+    expect(result.updatedDraft.actualBehavior).toContain('页面没反应');
+    expect(result.updatedDraft.expectedBehavior).toBe('显示保存成功。');
+  });
+
+  it('accepts the four core facts from a Chinese multi-turn report without optional follow-up questions', async () => {
+    const firstText = '前端项目问题，store，点击module分类，切换无反应。预期结果，点击tab切换能正常切换！';
+    const service = new IntakeService({
+      async complete(input) {
+        const turn = await new FakeIntakeModel().complete(input);
+        // Simulate a real LLM that keeps asking for route/log/version after it
+        // has received the required project and repository facts.
+        return {
+          ...turn,
+          questions: [
+            { field: 'environment.frontend.route', text: '请补充页面路由？', importance: 'high' },
+            { field: 'evidence.errorMessages', text: '控制台是否有错误？', importance: 'high' },
+            { field: 'environment.appVersion', text: '应用版本是什么？', importance: 'medium' },
+          ],
+          readyForConfirmation: false,
+        };
+      },
+    });
+
+    const first = await service.processTurn({}, [], firstText);
+    expect(first.updatedDraft.actualBehavior).toContain('切换无反应');
+    expect(first.updatedDraft.expectedBehavior).toContain('点击tab切换能正常切换');
+    expect(first.updatedDraft.component).toBe('store');
+    expect(first.completeness.readyForConfirmation).toBe(false);
+    expect(first.turn.questions.map((question) => question.field)).toContain('environmentProfile.repositoryUrl');
+
+    const second = await service.processTurn(
+      first.updatedDraft,
+      [],
+      'http://172.29.100.126/codigger-llm/app-honourbell-store.git，分支 llm-bugfix。在 app-honourbell-store 模块点击 App Desktop Addon 后停留在原 tab，无其他补充了。',
+    );
+    expect(second.updatedDraft.environmentProfile).toMatchObject({
+      name: 'app-honourbell-store',
+      repositoryUrl: 'http://172.29.100.126/codigger-llm/app-honourbell-store.git',
+      defaultBranch: 'llm-bugfix',
+    });
+    expect(second.completeness.score).toBeGreaterThanOrEqual(65);
+    expect(second.completeness.readyForSubmission).toBe(true);
+    expect(second.completeness.readyForConfirmation).toBe(true);
+    expect(second.turn.questions).toEqual([]);
+    expect(second.reply).toContain('确认提交');
+  });
+
+  it('keeps asking for a missing core fact and never returns confirmation for optional-rich drafts', async () => {
+    const model: IntakeModel = {
+      async complete(): Promise<IntakeTurnResult> {
+        return {
+          fieldUpdates: {
+            actualBehavior: '点击后仍停留在原 tab',
+            executionTarget: 'frontend',
+            reproduction: { steps: ['打开页面', '点击 tab'], prerequisites: [], testData: [], reproducible: true, frequency: 'always' },
+            environment: { environmentName: 'staging', appVersion: '1.0.0', buildNumber: null, commitSha: null, additionalInfo: {} },
+            evidence: { errorMessages: ['没有预期结果字段'], stackTraces: [], logs: [], screenshots: [], videos: [], networkTraces: [], jsonFiles: [], otherFiles: [] },
+            impact: { scope: 'all_users', blocksTesting: true, affectedUsers: null, workaroundExists: null, workaround: null },
+          },
+          observations: [], reporterHypotheses: [], contradictions: [], possibleSensitiveData: false,
+          executionTargetConfidence: 1,
+          questions: [{ field: 'environment.frontend.route', text: '请提供页面路由？', importance: 'high' }],
+          readyForConfirmation: true,
+        };
+      },
+    };
+    const result = await new IntakeService(model).processTurn({}, [], '仍然有问题');
+    expect(result.completeness.score).toBeLessThan(65);
+    expect(result.completeness.readyForConfirmation).toBe(false);
+    expect(result.reply).not.toContain('确认提交');
+    expect(result.turn.questions.every((question) => [
+      'actualBehavior', 'expectedBehavior', 'environmentProfile.name', 'environmentProfile.repositoryUrl',
+    ].includes(question.field))).toBe(true);
+  });
+
   it('allows a latest chat correction to replace an old extracted value', async () => {
     const result = await new IntakeService(new FakeIntakeModel()).processTurn({ executionTarget: 'backend', actualBehavior: '接口返回 500' }, [], '我刚才说错了，实际上是前端页面没有跳转，接口正常返回 200。', ['executionTarget']);
     expect(result.updatedDraft.executionTarget).toBe('frontend');
@@ -122,7 +217,7 @@ describe('Intake Agent & Service', () => {
     expect(markdown).toContain('- Project/Profile: frontend-main');
     const reconciled = reconcileBugDocument({ currentDraft: draft, markdown: markdown.replace('frontend-main', 'frontend-next'), documentRevision: 1, documentSha256: sha256Document(markdown.replace('frontend-main', 'frontend-next')) });
     expect(reconciled.fieldUpdates.environmentProfileId).toBe('frontend-next');
-    expect(renderBugDocument(draft, evaluateCompleteness(draft))).toContain('## Missing Information');
+    expect(renderBugDocument(draft, evaluateCompleteness(draft))).not.toContain('## Missing Information');
   });
 
   it('does not call the reconciler for a document whose content hash is already reconciled', async () => {
