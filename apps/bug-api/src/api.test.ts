@@ -4,19 +4,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { newId } from '@llmbugfix/shared';
 import { openDatabase, SQLiteBugRepository } from '@llmbugfix/bug-repository';
+import { JobQueue } from '@llmbugfix/job-queue';
 import { FakeIntakeModel, IntakeService, type DocumentReconciliationInput, type IntakeModel, type IntakeModelInput, type IntakeTurnResult } from '@llmbugfix/intake-agent';
 import { BugApiServer } from './index.js';
 
 describe('Bug API routes', () => {
   let db: ReturnType<typeof openDatabase>;
+  let repository: SQLiteBugRepository;
   let server: BugApiServer;
   const userId = newId();
 
   beforeEach(() => {
     db = openDatabase(':memory:');
-    const repo = new SQLiteBugRepository(db);
-    repo.createUser({ id: userId, displayName: 'QA Tester', email: 'tester@internal.local' });
-    server = new BugApiServer({}, repo, new IntakeService(new FakeIntakeModel()));
+    repository = new SQLiteBugRepository(db);
+    repository.createUser({ id: userId, displayName: 'QA Tester', email: 'tester@internal.local' });
+    server = new BugApiServer({}, repository, new IntakeService(new FakeIntakeModel()));
   });
   afterEach(() => db.close());
 
@@ -219,5 +221,21 @@ describe('Bug API routes', () => {
     const payload = JSON.parse(errorBlock!.match(/^data: (.+)$/m)![1]);
     expect(payload.status).toBe(500);
     expect(payload.error).toContain('Intake LLM exploded');
+  });
+
+  it('exposes candidate artifacts and retries FIX_CANDIDATE as a queued job', async () => {
+    const conversation = repository.createConversation({ id: newId(), reporterId: userId, status: 'active', draft: {}, completeness: { score: 85, dimensions: { problem: 25, reproduction: 30, environment: 10, evidence: 10, impact: 10 }, missingCriticalInformation: [], recommendedQuestions: [], readyForSubmission: true } });
+    const bug = repository.createBug({ title: 'Candidate retry', productArea: null, component: null, bugType: 'functional', executionTarget: 'frontend', environmentProfileId: 'frontend-main', severity: 'medium', actualBehavior: 'Button is stuck', expectedBehavior: 'Button responds', reproduction: { reproducible: true, frequency: 'always', prerequisites: [], steps: ['Click button'], testData: [] }, environment: { environmentName: 'test', appVersion: '1.0', buildNumber: null, commitSha: null, additionalInfo: {} }, evidence: { errorMessages: [], stackTraces: [], logs: [], screenshots: [], videos: [], networkTraces: [], jsonFiles: [], otherFiles: [] }, impact: { affectedUsers: null, scope: 'some_users', blocksTesting: false, workaroundExists: false, workaround: null }, regression: { isRegression: false, lastKnownGoodVersion: null, suspectedVersion: null }, observations: [], reporterHypotheses: [], reporter: { userId, displayName: 'QA Tester' }, intake: { completenessScore: 85, confidence: 1, missingInformation: [], conversationId: conversation.id, llmSummary: 'Candidate' } });
+    for (const status of ['COLLECTING', 'READY_FOR_CONFIRMATION', 'SUBMITTED', 'TRIAGING', 'QUEUED', 'PREPARING_ENV', 'FIXING', 'FIX_CANDIDATE'] as const) repository.changeBugStatus(bug.bugKey, status);
+    const queue = new JobQueue(repository, fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-api-queue-')));
+    const job = queue.enqueueJob(bug.id, bug.bugKey); const running = queue.claimNextJob('api-test-worker'); expect(running?.status).toBe('RUNNING'); queue.failJob(job.id, 'completion format failed', 'api-test-worker');
+    const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-api-artifacts-')); const artifactDir = path.join(artifactRoot, 'agent-results', bug.bugKey); fs.mkdirSync(artifactDir, { recursive: true }); fs.writeFileSync(path.join(artifactDir, 'candidate.json'), '{"bugKey":"' + bug.bugKey + '"}\n'); fs.writeFileSync(path.join(artifactDir, 'diff.patch'), 'candidate patch\n');
+    const candidateServer = new BugApiServer({ DATA_ROOT: artifactRoot }, { repo: repository, queue, intake: new IntakeService(new FakeIntakeModel()) });
+    const artifacts = await candidateServer.inject<{ files: string[]; artifacts: Record<string, unknown> }>({ url: `/api/bugs/${bug.bugKey}/artifacts` });
+    expect(artifacts.status).toBe(200); expect(artifacts.data.files).toContain('candidate.json'); expect(artifacts.data.files).toContain('diff.patch');
+    const retried = await candidateServer.inject<{ bug: { status: string }; job: { status: string }; automatic: boolean }>({ method: 'POST', url: `/api/bugs/${bug.bugKey}/retry` });
+    expect(retried.status, retried.raw).toBe(200); expect(retried.data.bug.status).toBe('QUEUED'); expect(retried.data.job.status).toBe('QUEUED'); expect(retried.data.automatic).toBe(false);
+    expect(repository.getBug(bug.bugKey)).toMatchObject({ bugKey: bug.bugKey });
+    expect((repository.database.prepare('SELECT status FROM bug_reports WHERE bug_key = ?').get(bug.bugKey) as { status: string }).status).toBe('QUEUED');
   });
 });

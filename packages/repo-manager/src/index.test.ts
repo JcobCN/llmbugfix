@@ -5,6 +5,18 @@ import path from 'node:path';
 import { RepoManager } from './index.js';
 
 class FakeRunner { calls: string[][] = []; cwds: string[] = []; async run(command: string, args: string[], options: any): Promise<any> { this.calls.push([command, ...args]); this.cwds.push(options.cwd); const text = args.join(' '); if (text.includes('branch --show-current')) return { command, args, exitCode: 0, stdout: 'ai/BUG-000001-fix\n', stderr: '', timedOut: false }; if (text.includes('remote get-url origin')) return { command, args, exitCode: 0, stdout: 'https://localhost/example.git\n', stderr: '', timedOut: false }; if (args[0] === 'rev-parse') return { command, args, exitCode: 0, stdout: 'abc123\n', stderr: '', timedOut: false }; return { command, args, exitCode: 0, stdout: '', stderr: '', timedOut: false }; } }
+class UntrackedRunner extends FakeRunner {
+  intentAdded = false;
+  override async run(command: string, args: string[], options: any): Promise<any> {
+    this.calls.push([command, ...args]); this.cwds.push(options.cwd);
+    if (args[0] === 'ls-files') return { command, args, exitCode: 0, stdout: 'new-regression.test.ts\0', stderr: '', timedOut: false };
+    if (args[0] === 'add' && args[1] === '-N') { this.intentAdded = true; return { command, args, exitCode: 0, stdout: '', stderr: '', timedOut: false }; }
+    if (args[0] === 'reset') { this.intentAdded = false; return { command, args, exitCode: 0, stdout: '', stderr: '', timedOut: false }; }
+    if (args[0] === 'diff' && args.includes('--name-only')) return { command, args, exitCode: 0, stdout: 'new-regression.test.ts\0', stderr: '', timedOut: false };
+    if (args[0] === 'diff') return { command, args, exitCode: 0, stdout: 'diff --git a/new-regression.test.ts b/new-regression.test.ts\n+test\n', stderr: '', timedOut: false };
+    return super.run(command, args, options);
+  }
+}
 describe('RepoManager', () => {
   it('uses safe slug and rejects push on a protected/non-ai branch', async () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-repo-')); const repo = path.join(root, 'repo'); const wtRoot = path.join(root, 'worktrees'); fs.mkdirSync(path.join(repo, '.git'), { recursive: true }); fs.mkdirSync(wtRoot); const wt = path.join(wtRoot, 'BUG-000001'); fs.mkdirSync(wt); const fake = new FakeRunner(); const manager = new RepoManager({ worktreesRoot: wtRoot, repositoryRoots: [root], allowedRemoteHost: 'localhost', commandRunner: fake as any }); expect(manager.createBranchName('BUG-000001', '../../ Unsafe title!')).toBe('ai/BUG-000001-unsafe-title'); await expect(manager.commitAndPush(wt, 'main', 'bad')).rejects.toThrow(/ai|protected/); });
   it('checks branch and remote before push', async () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-repo-')); const wtRoot = path.join(root, 'worktrees'); const wt = path.join(wtRoot, 'BUG-000001'); fs.mkdirSync(path.join(wt, '.git'), { recursive: true }); const fake = new FakeRunner(); const manager = new RepoManager({ worktreesRoot: wtRoot, repositoryRoots: [root], allowedRemoteHost: 'localhost', commandRunner: fake as any }); await manager.push(wt, 'ai/BUG-000001-fix'); expect(fake.calls.some((x) => x.includes('push'))).toBe(true); });
@@ -38,6 +50,29 @@ describe('RepoManager', () => {
     expect(fs.existsSync(path.join(cloned, '.git'))).toBe(true);
     await expect(manager.cloneRemoteRepository(remote, 'remote-1234567890abcdef')).resolves.toBe(cloned);
     expect(calls.filter((call) => call.includes('clone'))).toHaveLength(1);
+  });
+  it('checks a candidate patch against the exact base and removes its temporary file', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-candidate-')); const repo = path.join(root, 'repo'); const wtRoot = path.join(root, 'worktrees'); const wt = path.join(wtRoot, 'BUG-000001');
+    fs.mkdirSync(path.join(repo, '.git'), { recursive: true }); fs.mkdirSync(path.join(wt, '.git'), { recursive: true });
+    const fake = new FakeRunner(); const manager = new RepoManager({ worktreesRoot: wtRoot, repositoryRoots: [repo], commandRunner: fake as any }); const patch = 'diff --git a/file.txt b/file.txt\n';
+    await manager.applyPatch(wt, patch, 'abc123');
+    const applyCalls = fake.calls.filter((call) => call[1] === 'apply');
+    expect(applyCalls).toHaveLength(2); expect(applyCalls[0][2]).toBe('--check'); expect(applyCalls[0][3]).toBe('--binary'); expect(applyCalls[0].at(-1)).toBe(applyCalls[1].at(-1));
+    const temporary = applyCalls[0].at(-1)!; expect(temporary).toMatch(/\.candidate-[a-f0-9]{24}\.patch$/u); expect(fs.existsSync(temporary)).toBe(false);
+  });
+  it('fails closed when a candidate patch base does not match', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-candidate-')); const repo = path.join(root, 'repo'); const wtRoot = path.join(root, 'worktrees'); const wt = path.join(wtRoot, 'BUG-000001');
+    fs.mkdirSync(path.join(repo, '.git'), { recursive: true }); fs.mkdirSync(path.join(wt, '.git'), { recursive: true });
+    const fake = new FakeRunner(); const manager = new RepoManager({ worktreesRoot: wtRoot, repositoryRoots: [repo], commandRunner: fake as any });
+    await expect(manager.applyPatch(wt, 'candidate', 'different-base')).rejects.toThrow(/base commit mismatch/);
+    expect(fake.calls.some((call) => call[1] === 'apply')).toBe(false);
+  });
+  it('includes untracked fixer files in snapshots without leaving index intent entries', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-untracked-')); const repo = path.join(root, 'repo'); const wtRoot = path.join(root, 'worktrees'); const wt = path.join(wtRoot, 'BUG-000001');
+    fs.mkdirSync(path.join(repo, '.git'), { recursive: true }); fs.mkdirSync(path.join(wt, '.git'), { recursive: true });
+    const fake = new UntrackedRunner(); const manager = new RepoManager({ worktreesRoot: wtRoot, repositoryRoots: [repo], commandRunner: fake as any });
+    await expect(manager.diff(wt)).resolves.toContain('new-regression.test.ts'); await expect(manager.filesChanged(wt)).resolves.toEqual(['new-regression.test.ts']);
+    expect(fake.intentAdded).toBe(false); expect(fake.calls.filter((call) => call[1] === 'add' && call[2] === '-N')).toHaveLength(2); expect(fake.calls.filter((call) => call[1] === 'reset')).toHaveLength(2);
   });
   it('does not overwrite a completed generated checkout for another remote', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-clone-')); const clones = path.join(root, 'repositories'); const target = path.join(clones, 'remote-1234567890abcdef');

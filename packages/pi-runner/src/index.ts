@@ -21,10 +21,12 @@ import {
   createEditToolDefinition,
   createExtensionRuntime,
   createWriteToolDefinition,
+  defineTool,
   ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSession,
+  type AgentSessionEvent,
   type CreateAgentSessionOptions,
   type ResourceLoader,
   type ToolDefinition,
@@ -40,14 +42,22 @@ export type ReviewResultChecked = z.infer<typeof StrictReviewResultSchema>;
 export type PiRunnerLogger = { info: (obj: object, msg: string) => void; error: (obj: object, msg: string) => void };
 
 /**
- * Thrown when an agent's final text cannot be parsed into the contract JSON
- * even after one correction attempt. The raw output is preserved so callers
+ * Thrown only for the compatibility text fallback when no structured
+ * submit_fix_result call was accepted. The raw output is preserved so callers
  * can persist it as forensic evidence instead of losing the agent's work.
  */
 export class PiAgentOutputFormatError extends Error {
   constructor(readonly role: 'fixer' | 'reviewer', readonly rawOutput: string, readonly validationError: string) {
     super(`Pi ${role} output failed contract validation after one correction attempt: ${validationError}`);
     this.name = 'PiAgentOutputFormatError';
+  }
+}
+
+/** Raised when the Pi loop exceeds a bounded turn/tool budget. */
+export class PiAgentLoopBudgetError extends Error {
+  constructor(readonly role: 'fixer' | 'reviewer', readonly limit: string, readonly value: number) {
+    super(`Pi ${role} session exceeded ${limit} budget (${value})`);
+    this.name = 'PiAgentLoopBudgetError';
   }
 }
 
@@ -87,13 +97,20 @@ const DEFAULT_FIXER_TIMEOUT_MS = 2_700_000;
 const DEFAULT_REVIEWER_TIMEOUT_MS = 900_000;
 const DEFAULT_MAX_TOKENS = 32_768;
 const DEFAULT_CONTEXT_WINDOW = 128_000;
+const DEFAULT_MAX_TURNS = 80;
+const DEFAULT_MAX_TOOL_CALLS = 240;
+const DEFAULT_MAX_REPEATED_TOOL_CALLS = 4;
+const DEFAULT_CLOSEOUT_GRACE_MS = 15_000;
 
 /**
  * The small surface of a Pi session used by this adapter. Keeping this
  * interface injectable makes tests deterministic without reimplementing Pi's
  * agent loop or tool-call handling.
  */
-export type PiSession = Pick<AgentSession, 'prompt' | 'getLastAssistantText' | 'abort' | 'dispose'>;
+export type PiSession = Pick<AgentSession, 'prompt' | 'getLastAssistantText' | 'abort' | 'dispose'> & {
+  /** Optional in the test seam; real AgentSession always supplies it. */
+  subscribe?: (listener: (event: AgentSessionEvent) => void) => () => void;
+};
 
 export interface PiModelRuntime {
   registerProvider(providerId: string, config: {
@@ -164,6 +181,14 @@ export interface PiAgentRunnerOptions {
   confineWorkspace?: boolean;
   /** Optional structural logger for prompt/validation diagnostics. */
   logger?: PiRunnerLogger;
+  fixerMaxTurns?: number;
+  reviewerMaxTurns?: number;
+  fixerMaxToolCalls?: number;
+  reviewerMaxToolCalls?: number;
+  fixerMaxRepeatedToolCalls?: number;
+  reviewerMaxRepeatedToolCalls?: number;
+  fixerCloseoutGraceMs?: number;
+  reviewerCloseoutGraceMs?: number;
 }
 
 export class PiAgentRunnerTimeoutError extends Error {
@@ -217,6 +242,17 @@ function positiveTimeout(value: number | undefined, fallback: number, name: stri
   return timeout;
 }
 
+function envNumber(name: string): number | undefined {
+  const raw = process.env[name];
+  return raw === undefined || raw === '' ? undefined : Number(raw);
+}
+
+function positiveInteger(value: number | undefined, fallback: number, name: string): number {
+  const result = value ?? fallback;
+  if (!Number.isInteger(result) || result <= 0) throw new Error(`${name} must be a positive integer`);
+  return result;
+}
+
 function isolatedResourceLoader(role: 'fixer' | 'reviewer'): ResourceLoader {
   return {
     // Do not discover ~/.pi, project .pi, extensions, skills, templates, or
@@ -249,7 +285,7 @@ function summarizeToolParams(tool: string, params: unknown): Record<string, stri
   const clip = (input: string, max = 300): string => (input.length > max ? `${input.slice(0, max)}…` : input);
   if (tool === 'bash') {
     const command = typeof value.command === 'string' ? value.command : '';
-    return { command: clip(command, 500) };
+    return { command: redactedToolValue(command, 500) };
   }
   if (typeof value.path === 'string') {
     const summary: Record<string, string | number> = { path: value.path };
@@ -258,9 +294,90 @@ function summarizeToolParams(tool: string, params: unknown): Record<string, stri
     if (tool === 'write' && typeof value.content === 'string') summary.bytes = value.content.length;
     return summary;
   }
-  if (tool === 'grep' && typeof value.pattern === 'string') return { pattern: clip(value.pattern), ...(typeof value.path === 'string' ? { path: value.path } : {}) };
+  if (tool === 'grep' && typeof value.pattern === 'string') return { pattern: redactedToolValue(value.pattern), ...(typeof value.path === 'string' ? { path: value.path } : {}) };
   if (tool === 'find') { if (typeof value.pattern === 'string') return { pattern: clip(value.pattern) }; }
-  return { params: clip(JSON.stringify(value)) };
+  return { params: redactedToolValue(JSON.stringify(value)) };
+}
+
+const redactedToolValue = (value: string, max = 500): string => {
+  // Tool audit logs are deliberately summaries, not a transcript. Redact the
+  // common credential-shaped command arguments before applying the size cap.
+  const safe = value.replace(/((?:api[_-]?key|token|secret|password|passwd|authorization|cookie)\s*[=:]\s*)([^\s,;]+)/giu, '$1[REDACTED]');
+  return safe.length > max ? `${safe.slice(0, max)}…` : safe;
+};
+
+/**
+ * The canonical result remains strict (arrays are arrays). This tiny adapter
+ * is the only compatibility exception for old/fragile model wire formats:
+ * empty strings become [], and non-empty strings become one-item arrays.
+ * It intentionally does not parse prose or touch unknown/semantic fields.
+ */
+export function repairAgentFixResultInput(value: unknown, onRepair?: (fields: string[]) => void): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const result = { ...(value as Record<string, unknown>) };
+  const repaired: string[] = [];
+  for (const field of ['riskNotes', 'missingInformation'] as const) {
+    if (typeof result[field] === 'string') {
+      result[field] = result[field] === '' ? [] : [result[field]];
+      repaired.push(field);
+    }
+  }
+  if (repaired.length) onRepair?.(repaired);
+  return result;
+}
+
+export type SubmitFixResultToolOptions = {
+  expectedBugKey: string;
+  logger?: PiRunnerLogger;
+  onSubmit: (result: AgentFixResultChecked) => void;
+  result?: AgentFixResultChecked;
+};
+
+/**
+ * A TypeBox-compatible JSON schema is kept inline to avoid adding another
+ * runtime dependency to this adapter. `prepareArguments` runs before Pi's
+ * schema validator, allowing only the documented two-field wire repair.
+ */
+export function createSubmitFixResultTool(options: SubmitFixResultToolOptions): ToolDefinition {
+  const stringArray = { type: 'array', items: { type: 'string' } };
+  const nullableString = { anyOf: [{ type: 'string' }, { type: 'null' }] };
+  const parameters = {
+    type: 'object', additionalProperties: false,
+    properties: {
+      bugKey: { type: 'string', pattern: '^BUG-[0-9]{6,}$' },
+      status: { type: 'string', enum: ['fixed', 'blocked', 'not_reproducible', 'failed'] },
+      confidence: { type: 'number', minimum: 0, maximum: 1 }, summary: { type: 'string' }, rootCause: nullableString,
+      reproduced: { type: 'boolean' }, regressionTestAdded: { type: 'boolean' }, filesChanged: stringArray,
+      riskNotes: stringArray, blockedReason: nullableString, missingInformation: stringArray,
+    },
+    required: ['bugKey', 'status', 'confidence', 'summary', 'rootCause', 'reproduced', 'regressionTestAdded', 'filesChanged', 'riskNotes', 'blockedReason', 'missingInformation'],
+  } as unknown as ToolDefinition['parameters'];
+
+  return defineTool({
+    name: 'submit_fix_result', label: 'Submit fix result',
+    description: 'Submit the completed fixer result to the host. Call exactly once after making and checking the fix.',
+    promptSnippet: 'submit_fix_result — submit the structured fixer result',
+    promptGuidelines: ['This is the authoritative completion channel. Call it exactly once when your work is complete.', 'Do not put the result in prose; pass every required field with its declared type.'],
+    parameters,
+    prepareArguments: (args: unknown) => repairAgentFixResultInput(args, (fields) => options.logger?.info({ role: 'fixer', fields }, 'contract_repaired')) as never,
+    execute: async (_toolCallId, params) => {
+      const repaired = repairAgentFixResultInput(params, (fields) => options.logger?.info({ role: 'fixer', fields }, 'contract_repaired'));
+      let result: AgentFixResultChecked;
+      try { result = StrictFixResultSchema.parse(repaired); }
+      catch (error) {
+        const detail = error instanceof z.ZodError ? error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') : String(error);
+        throw new Error(`submit_fix_result rejected: ${detail}`);
+      }
+      if (result.bugKey !== options.expectedBugKey) throw new Error(`submit_fix_result bugKey must equal ${options.expectedBugKey}`);
+      if (options.result) throw new Error('submit_fix_result may only be called once');
+      options.onSubmit(result);
+      options.result = result;
+      // `terminate` tells Pi to stop its loop after this tool batch. The
+      // model may still emit a trailing assistant message in some providers;
+      // the host continues to treat this captured result as authoritative.
+      return { content: [{ type: 'text', text: 'Fix result accepted by host.' }], details: { accepted: true }, terminate: true };
+    },
+  });
 }
 
 function fixerPrompt(input: FixerInput, safety: string): string {
@@ -268,8 +385,9 @@ function fixerPrompt(input: FixerInput, safety: string): string {
     'Fix the reported bug in the current repository. You own the coding loop: inspect, reproduce when useful, edit files, and run appropriate validation.',
     `Safety policy: ${safety}`,
     'Do not push, merge, deploy, access production, or download dependencies.',
-    'When finished, reply with exactly one JSON object (a single fenced ```json block is also accepted) and no surrounding prose.',
-    'The JSON must contain: bugKey, status (fixed|blocked|not_reproducible|failed), confidence (0..1), summary, rootCause, reproduced, regressionTestAdded, filesChanged, riskNotes, blockedReason, missingInformation.',
+    'When finished, call the submit_fix_result tool exactly once. Its accepted parameters are the only authoritative completion; ordinary assistant prose after a successful tool call is ignored.',
+    'The configured endpoint must support tool calls/function calling. If it supports tools but this run produces no accepted tool call, the compatibility fallback is exactly one JSON object (a single fenced ```json block is also accepted) and no surrounding prose.',
+    'The result fields are: bugKey, status (fixed|blocked|not_reproducible|failed), confidence (0..1), summary, rootCause, reproduced, regressionTestAdded, filesChanged, riskNotes, blockedReason, missingInformation. riskNotes and missingInformation are arrays of strings.',
     `Task and context:\n${asJson({ task: input.task, profile: input.profile, docs: input.docs ?? [], skills: input.skills ?? [], attachments: input.attachments ?? [] })}`,
   ].join('\n\n');
 }
@@ -299,6 +417,14 @@ export class PiAgentRunner implements AgentRunner {
   private readonly bashShellPath?: string;
   private readonly confineWorkspace: boolean;
   private readonly logger?: PiRunnerLogger;
+  private readonly fixerMaxTurns: number;
+  private readonly reviewerMaxTurns: number;
+  private readonly fixerMaxToolCalls: number;
+  private readonly reviewerMaxToolCalls: number;
+  private readonly fixerMaxRepeatedToolCalls: number;
+  private readonly reviewerMaxRepeatedToolCalls: number;
+  private readonly fixerCloseoutGraceMs: number;
+  private readonly reviewerCloseoutGraceMs: number;
   private runtimePromise?: Promise<PiModelRuntime>;
 
   constructor(options: PiAgentRunnerOptions = {}) {
@@ -330,6 +456,14 @@ export class PiAgentRunner implements AgentRunner {
     this.bashShellPath = options.bashShellPath?.trim() || undefined;
     this.confineWorkspace = options.confineWorkspace ?? false;
     this.logger = options.logger;
+    this.fixerMaxTurns = positiveInteger(options.fixerMaxTurns ?? envNumber('PI_FIXER_MAX_TURNS'), DEFAULT_MAX_TURNS, 'PI_FIXER_MAX_TURNS');
+    this.reviewerMaxTurns = positiveInteger(options.reviewerMaxTurns ?? envNumber('PI_REVIEWER_MAX_TURNS'), DEFAULT_MAX_TURNS, 'PI_REVIEWER_MAX_TURNS');
+    this.fixerMaxToolCalls = positiveInteger(options.fixerMaxToolCalls ?? envNumber('PI_FIXER_MAX_TOOL_CALLS'), DEFAULT_MAX_TOOL_CALLS, 'PI_FIXER_MAX_TOOL_CALLS');
+    this.reviewerMaxToolCalls = positiveInteger(options.reviewerMaxToolCalls ?? envNumber('PI_REVIEWER_MAX_TOOL_CALLS'), DEFAULT_MAX_TOOL_CALLS, 'PI_REVIEWER_MAX_TOOL_CALLS');
+    this.fixerMaxRepeatedToolCalls = positiveInteger(options.fixerMaxRepeatedToolCalls ?? envNumber('PI_FIXER_MAX_REPEATED_TOOL_CALLS'), DEFAULT_MAX_REPEATED_TOOL_CALLS, 'PI_FIXER_MAX_REPEATED_TOOL_CALLS');
+    this.reviewerMaxRepeatedToolCalls = positiveInteger(options.reviewerMaxRepeatedToolCalls ?? envNumber('PI_REVIEWER_MAX_REPEATED_TOOL_CALLS'), DEFAULT_MAX_REPEATED_TOOL_CALLS, 'PI_REVIEWER_MAX_REPEATED_TOOL_CALLS');
+    this.fixerCloseoutGraceMs = positiveTimeout(options.fixerCloseoutGraceMs ?? envNumber('PI_FIXER_CLOSEOUT_GRACE_MS'), DEFAULT_CLOSEOUT_GRACE_MS, 'PI_FIXER_CLOSEOUT_GRACE_MS');
+    this.reviewerCloseoutGraceMs = positiveTimeout(options.reviewerCloseoutGraceMs ?? envNumber('PI_REVIEWER_CLOSEOUT_GRACE_MS'), DEFAULT_CLOSEOUT_GRACE_MS, 'PI_REVIEWER_CLOSEOUT_GRACE_MS');
   }
 
   /**
@@ -341,7 +475,7 @@ export class PiAgentRunner implements AgentRunner {
    * - edit/write reject any path that resolves outside the worktree when
    *   confineWorkspace is set.
    */
-  private fixerConfinedTools(cwd: string): ToolDefinition[] {
+  private fixerConfinedTools(cwd: string, completion?: SubmitFixResultToolOptions): ToolDefinition[] {
     // Pi's concrete tool definitions are generic over their schema; the custom
     // tools boundary is the unparameterized ToolDefinition, so the variance is
     // bridged with an explicit cast at this single point.
@@ -373,6 +507,7 @@ export class PiAgentRunner implements AgentRunner {
     if (bashDefinition) tools.push(audited('bash', bashDefinition, false));
     if (this.logger) tools.push(audited('edit', editDefinition, this.confineWorkspace), audited('write', writeDefinition, this.confineWorkspace));
     else if (this.confineWorkspace) tools.push(audited('edit', editDefinition, true), audited('write', writeDefinition, true));
+    if (completion) tools.push(createSubmitFixResultTool(completion));
     return tools;
   }
 
@@ -414,14 +549,16 @@ export class PiAgentRunner implements AgentRunner {
     return this.runtimePromise;
   }
 
-  private async runRole<T>(role: 'fixer' | 'reviewer', cwd: string, prompt: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, signal?: AbortSignal): Promise<T> {
+  private async runRole<T>(role: 'fixer' | 'reviewer', cwd: string, prompt: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, signal?: AbortSignal, completion?: SubmitFixResultToolOptions): Promise<T> {
     if (role === 'fixer' && this.requireSandbox && !this.sandboxProfile) throw new Error('Pi fixer is disabled: PI_SANDBOX_PROFILE must name an externally enforced sandbox');
     if (signal?.aborted) throw new Error('Pi session cancelled');
     const runtime = await this.getRuntime();
     const model = runtime.getModel(PROVIDER_ID, this.modelName);
     if (!model) throw new Error(`Pi model is unavailable: ${PROVIDER_ID}/${this.modelName}`);
-    const tools = role === 'fixer' ? FIXER_TOOLS : REVIEWER_TOOLS;
-    const customTools = role === 'fixer' ? this.fixerConfinedTools(cwd) : [];
+    const customTools = role === 'fixer' ? this.fixerConfinedTools(cwd, completion) : [];
+    // `createAgentSession({ tools })` doubles as Pi's allowed-tool allowlist;
+    // include the SDK completion tool there or Pi would register but hide it.
+    const tools = role === 'fixer' ? [...FIXER_TOOLS, ...(completion ? ['submit_fix_result'] as const : [])] : REVIEWER_TOOLS;
     const sessionResult = await this.sessionFactory({
       cwd,
       model,
@@ -438,12 +575,113 @@ export class PiAgentRunner implements AgentRunner {
     });
     const session = sessionResult.session;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let closeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    let closeoutExpired: Promise<void> | undefined;
     let timedOut = false;
+    let closeoutRequested = false;
+    let resolveBudgetTriggered: (() => void) | undefined;
+    const budgetTriggered = new Promise<void>((resolve) => { resolveBudgetTriggered = resolve; });
+    let budgetError: PiAgentLoopBudgetError | undefined;
+    let turns = 0;
+    let toolCalls = 0;
+    let previousToolSignature = '';
+    let repeatedToolCalls = 0;
     const timeoutMs = role === 'fixer' ? this.fixerTimeoutMs : this.reviewerTimeoutMs;
+    const maxTurns = role === 'fixer' ? this.fixerMaxTurns : this.reviewerMaxTurns;
+    const maxToolCalls = role === 'fixer' ? this.fixerMaxToolCalls : this.reviewerMaxToolCalls;
+    const maxRepeatedToolCalls = role === 'fixer' ? this.fixerMaxRepeatedToolCalls : this.reviewerMaxRepeatedToolCalls;
+    const closeoutGraceMs = role === 'fixer' ? this.fixerCloseoutGraceMs : this.reviewerCloseoutGraceMs;
+    const closeoutText = 'Stop inspecting and editing now. Submit the structured result with submit_fix_result (fixer) or the exact JSON fallback immediately. Do not start another tool call.';
+    const unsubscribe = session.subscribe?.((event) => {
+      const summary: Record<string, string | number | boolean> = { role, type: event.type };
+      const eventTurnIndex = 'turnIndex' in event && typeof event.turnIndex === 'number' ? event.turnIndex : undefined;
+      if (eventTurnIndex !== undefined) summary.turnIndex = eventTurnIndex;
+      if (event.type === 'turn_start') turns = eventTurnIndex === undefined ? turns + 1 : Math.max(turns, eventTurnIndex + 1);
+      if (event.type === 'tool_execution_start') {
+        toolCalls += 1;
+        summary.tool = event.toolName;
+        const signature = `${event.toolName}:${JSON.stringify(event.args ?? {})}`;
+        repeatedToolCalls = signature === previousToolSignature ? repeatedToolCalls + 1 : 1;
+        previousToolSignature = signature;
+        summary.toolCalls = toolCalls;
+        summary.repeatedToolCalls = repeatedToolCalls;
+      }
+      if (event.type === 'tool_execution_end') { summary.tool = event.toolName; summary.isError = event.isError; }
+      if (event.type === 'auto_retry_start' || event.type === 'auto_retry_end' || event.type === 'compaction_start' || event.type === 'compaction_end') {
+        this.logger?.info(summary, `pi ${role} session event`);
+      } else if (event.type === 'turn_start' || event.type === 'turn_end' || event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
+        this.logger?.info(summary, `pi ${role} session event`);
+      }
+      const limit = turns >= maxTurns ? ['max_turns', turns] as const
+        : toolCalls >= maxToolCalls ? ['max_tool_calls', toolCalls] as const
+          : repeatedToolCalls >= maxRepeatedToolCalls ? ['max_repeated_tool_calls', repeatedToolCalls] as const : undefined;
+      if (!limit || closeoutRequested) return;
+      budgetError = new PiAgentLoopBudgetError(role, limit[0], limit[1]);
+      closeoutRequested = true;
+      this.logger?.error({ role, limit: limit[0], value: limit[1] }, 'pi session budget reached; requesting one closeout');
+      // Pi queues a prompt submitted from an event callback. The one-shot flag
+      // and grace timer ensure that this cannot turn into another open loop.
+      void Promise.resolve().then(async () => {
+        try {
+          // The session is already streaming when the budget event fires. Pi
+          // requires an explicit delivery mode for an in-flight prompt; steer
+          // asks it to finish this one bounded closeout before the grace timer
+          // performs the hard abort.
+          await session.prompt(closeoutText, { expandPromptTemplates: false, source: 'rpc', streamingBehavior: 'steer' });
+        } catch { /* the grace timer still performs the bounded abort */ }
+      });
+      closeoutExpired = new Promise<void>((resolve) => {
+        closeoutTimer = setTimeout(() => {
+          // Resolve the budget wait at the deadline even if an SDK abort
+          // implementation stalls; the operation must remain hard-bounded.
+          resolve();
+          try { void Promise.resolve(session.abort()).catch(() => undefined); } catch { /* best-effort abort */ }
+        }, closeoutGraceMs);
+      });
+      resolveBudgetTriggered?.();
+    });
     try {
       const operation = (async () => {
-        this.logger?.info({ role, cwd, prompt }, `pi ${role} session prompt`);
-        await session.prompt(prompt, { expandPromptTemplates: false, source: 'rpc' });
+        this.logger?.info({ role, cwd, promptBytes: prompt.length }, `pi ${role} session prompt`);
+        // A steer is queued while the original prompt is streaming. Race the
+        // session's completion against the one-shot grace deadline so an SDK
+        // prompt that only settles after abort cannot keep this operation
+        // hanging indefinitely.
+        const initialPrompt = session.prompt(prompt, { expandPromptTemplates: false, source: 'rpc' });
+        const initialOutcome = initialPrompt.then(
+          () => ({ kind: 'completed' as const }),
+          (error) => ({ kind: 'error' as const, error }),
+        );
+        const outcome = await Promise.race([
+          initialOutcome,
+          budgetTriggered.then(() => Promise.race([
+            initialOutcome,
+            closeoutExpired!.then(() => ({ kind: 'expired' as const })),
+          ])),
+        ]);
+        if (outcome.kind === 'expired') throw budgetError ?? new PiAgentLoopBudgetError(role, 'closeout_grace', closeoutGraceMs);
+        if (outcome.kind === 'error' && !budgetError) throw outcome.error;
+        // A successful structured tool call is authoritative even when the
+        // model appends ordinary prose or an invalid final assistant message.
+        if (completion?.result) return completion.result as unknown as T;
+        if (budgetError) {
+          // Budget closeout is deliberately a separate protocol path: allow
+          // exactly one final text parse (with only the fixer wire repair),
+          // never the ordinary two-attempt correction loop. If it is invalid,
+          // consume the remaining grace so the timer performs the hard abort
+          // before reporting the budget failure.
+          try {
+            const output = await session.getLastAssistantText();
+            if (output === undefined || output === null) throw new Error(`Pi ${role} session returned no assistant text`);
+            const parsed = parseAgentJson(output);
+            const adapted = role === 'fixer' ? repairAgentFixResultInput(parsed, (fields) => this.logger?.info({ role, fields }, 'contract_repaired')) : parsed;
+            return schema.parse(adapted);
+          } catch (error) {
+            this.logger?.error({ role, error: error instanceof Error ? error.message : String(error) }, `pi ${role} closeout output failed validation`);
+            await closeoutExpired;
+            throw budgetError ?? new PiAgentLoopBudgetError(role, 'closeout_grace', closeoutGraceMs);
+          }
+        }
         // One correction attempt mirrors the intake model: a malformed final
         // answer is fed back to the same session so the agent can re-emit the
         // contract JSON without redoing its investigation.
@@ -454,10 +692,12 @@ export class PiAgentRunner implements AgentRunner {
           if (output === undefined || output === null) throw new Error(`Pi ${role} session returned no assistant text`);
           lastOutput = output;
           try {
-            return schema.parse(parseAgentJson(output));
+            const parsed = parseAgentJson(output);
+            const adapted = role === 'fixer' ? repairAgentFixResultInput(parsed, (fields) => this.logger?.info({ role, fields }, 'contract_repaired')) : parsed;
+            return schema.parse(adapted);
           } catch (error) {
             lastValidationError = error instanceof z.ZodError ? error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('\n') : error instanceof Error ? error.message : String(error);
-            this.logger?.error({ role, attempt: attempt + 1, validationError: lastValidationError, content: output }, `pi ${role} output failed validation`);
+            this.logger?.error({ role, attempt: attempt + 1, validationError: lastValidationError, outputBytes: output.length }, `pi ${role} output failed validation`);
             if (attempt === 0) {
               await session.prompt([
                 `Your previous response failed output validation:\n${lastValidationError}`,
@@ -481,6 +721,8 @@ export class PiAgentRunner implements AgentRunner {
       return await Promise.race(cancelled ? [operation, timeout, cancelled] : [operation, timeout]);
     } finally {
       if (timer) clearTimeout(timer);
+      if (closeoutTimer) clearTimeout(closeoutTimer);
+      unsubscribe?.();
       // `timedOut` is kept explicit to make the cancellation intent visible;
       // Pi's abort is best-effort and dispose is always required.
       if (timedOut) await Promise.resolve().catch(() => undefined);
@@ -491,7 +733,8 @@ export class PiAgentRunner implements AgentRunner {
   async runFixer(input: FixerInput): Promise<AgentFixResultChecked> {
     const task = BugFixTaskSchema.parse(input.task);
     const profile = EnvironmentProfileSchema.parse(input.profile);
-    const result = await this.runRole('fixer', input.worktreePath, fixerPrompt({ ...input, task, profile }, input.safety || this.safety), StrictFixResultSchema, input.signal);
+    const completion: SubmitFixResultToolOptions = { expectedBugKey: task.bugKey, logger: this.logger, onSubmit: () => undefined };
+    const result = await this.runRole('fixer', input.worktreePath, fixerPrompt({ ...input, task, profile }, input.safety || this.safety), StrictFixResultSchema, input.signal, completion);
     if (result.bugKey !== task.bugKey) throw new Error(`Pi fixer returned bugKey ${result.bugKey}, expected ${task.bugKey}`);
     return result;
   }

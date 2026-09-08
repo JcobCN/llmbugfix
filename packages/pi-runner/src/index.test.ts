@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { FakePiRunner, PiAgentRunner, PiAgentOutputFormatError, PiAgentRunnerTimeoutError, parseAgentJson, type PiSession, type PiSessionFactoryOptions } from './index.js';
+import { createSubmitFixResultTool, FakePiRunner, PiAgentRunner, PiAgentOutputFormatError, PiAgentLoopBudgetError, PiAgentRunnerTimeoutError, parseAgentJson, type PiSession, type PiSessionFactoryOptions } from './index.js';
+import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { BugFixTask } from '@llmbugfix/bug-domain';
 import type { EnvironmentProfile } from '@llmbugfix/environment-resolver';
 
@@ -76,7 +77,7 @@ describe('PiAgentRunner', () => {
       baseUrl: 'http://llm.test/v1', apiKey: 'test-secret', api: 'openai-completions', authHeader: true,
     }));
     expect(sessionOptions.map((options) => [...options.tools])).toEqual([
-      ['read', 'grep', 'find', 'ls', 'edit', 'write', 'bash'],
+      ['read', 'grep', 'find', 'ls', 'edit', 'write', 'bash', 'submit_fix_result'],
       ['read', 'grep', 'find', 'ls'],
     ]);
     expect(sessionOptions[0].cwd).toBe('/tmp/worktree');
@@ -142,7 +143,7 @@ describe('PiAgentRunner', () => {
     });
     await runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' });
     const tools = sessionOptions[0].customTools ?? [];
-    expect(tools.map((tool) => tool.name).sort()).toEqual(['bash', 'edit', 'write']);
+    expect(tools.map((tool) => tool.name).sort()).toEqual(['bash', 'edit', 'submit_fix_result', 'write']);
     const edit = tools.find((tool) => tool.name === 'edit');
     expect(edit).toBeTruthy();
     await expect(edit!.execute('t1', { path: '../escape.txt', edits: [] }, undefined, undefined, {} as never)).rejects.toThrow(/escapes the worktree sandbox/);
@@ -154,7 +155,112 @@ describe('PiAgentRunner', () => {
     const sessionOptions: PiSessionFactoryOptions[] = [];
     const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, sessionFactory: async (options) => { sessionOptions.push(options); return { session: sessionReturning(JSON.stringify(fixResult)) }; } });
     await runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' });
-    expect(sessionOptions[0].customTools).toBeUndefined();
+    expect(sessionOptions[0].customTools?.map((tool) => tool.name)).toContain('submit_fix_result');
+  });
+
+  it('keeps the first submit_fix_result authoritative and rejects every duplicate', async () => {
+    const accepted: unknown[] = [];
+    const tool = createSubmitFixResultTool({ expectedBugKey: task.bugKey, onSubmit: (result) => accepted.push(result) });
+    await tool.execute('first', fixResult, undefined, undefined, {} as never);
+    await expect(tool.execute('same', fixResult, undefined, undefined, {} as never)).rejects.toThrow(/only be called once/);
+    await expect(tool.execute('conflict', { ...fixResult, summary: 'different result' }, undefined, undefined, {} as never)).rejects.toThrow(/only be called once/);
+    expect(accepted).toEqual([fixResult]);
+  });
+
+  it('strictly rejects unknown keys and semantic type/value errors at submit_fix_result', async () => {
+    const invalidInputs = [
+      { ...fixResult, unexpected: true },
+      { ...fixResult, status: 'done' },
+      { ...fixResult, confidence: '0.9' },
+      { ...fixResult, reproduced: 'true' },
+    ];
+    for (const input of invalidInputs) {
+      const tool = createSubmitFixResultTool({ expectedBugKey: task.bugKey, onSubmit: () => undefined });
+      await expect(tool.execute('invalid', input, undefined, undefined, {} as never)).rejects.toThrow(/submit_fix_result rejected/);
+    }
+  });
+
+  it('repairs only legacy string array fields and records the repair event', async () => {
+    const info = vi.fn(); const accepted: any[] = [];
+    const tool = createSubmitFixResultTool({ expectedBugKey: task.bugKey, logger: { info, error: vi.fn() }, onSubmit: (result) => accepted.push(result) });
+    await tool.execute('legacy', { ...fixResult, riskNotes: 'legacy note', missingInformation: '' }, undefined, undefined, {} as never);
+    expect(accepted[0]).toMatchObject({ riskNotes: ['legacy note'], missingInformation: [] });
+    expect(info).toHaveBeenCalledWith({ role: 'fixer', fields: ['riskNotes', 'missingInformation'] }, 'contract_repaired');
+  });
+
+  it('accepts authoritative submit_fix_result followed by ordinary prose', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    let submit: ToolDefinition | undefined;
+    const session = {
+      prompt: vi.fn(async () => { await submit?.execute('submit-1', fixResult, undefined, undefined, {} as never); }),
+      getLastAssistantText: vi.fn(() => '修复完成，以上工具提交为准。'),
+      abort: vi.fn(async () => undefined), dispose: vi.fn(),
+    } as unknown as PiSession;
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, sessionFactory: async (options) => { submit = options.customTools?.find((tool) => tool.name === 'submit_fix_result'); return { session }; } });
+    await expect(runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' })).resolves.toEqual(fixResult);
+    expect(session.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs only string array fields at the fallback wire boundary', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    const repaired = { ...fixResult, riskNotes: 'a long note', missingInformation: '' };
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, sessionFactory: async () => ({ session: sessionReturning(JSON.stringify(repaired)) }) });
+    await expect(runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' })).resolves.toMatchObject({ riskNotes: ['a long note'], missingInformation: [] });
+  });
+
+  it('requests one closeout and aborts when a loop repeats the same tool', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    let listener: ((event: any) => void) | undefined;
+    let releaseInitial!: () => void; let releaseCloseout!: () => void;
+    const initialPending = new Promise<void>((resolve) => { releaseInitial = resolve; });
+    const abort = vi.fn(async () => { releaseInitial(); releaseCloseout?.(); });
+    const prompt = vi.fn((text: string, options?: { streamingBehavior?: string }) => { if (text.includes('Stop inspecting')) { expect(options?.streamingBehavior).toBe('steer'); return new Promise<void>((resolve) => { releaseCloseout = resolve; }); } listener?.({ type: 'tool_execution_start', toolName: 'read', args: { path: 'x' } }); listener?.({ type: 'tool_execution_start', toolName: 'read', args: { path: 'x' } }); return initialPending; });
+    const session = { prompt, getLastAssistantText: vi.fn(() => 'not a result'), abort, dispose: vi.fn(), subscribe: vi.fn((fn) => { listener = fn; return () => undefined; }) } as unknown as PiSession;
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, fixerMaxRepeatedToolCalls: 2, fixerCloseoutGraceMs: 1, sessionFactory: async () => ({ session }) });
+    await expect(runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' })).rejects.toThrow(/budget/);
+    expect(abort).toHaveBeenCalled();
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts a reviewer JSON result produced by the single budget closeout steer', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    let listener: ((event: any) => void) | undefined; let closeout = false;
+    const prompt = vi.fn(async (text: string, options?: { streamingBehavior?: string }) => {
+      if (text.includes('Stop inspecting')) { closeout = true; expect(options?.streamingBehavior).toBe('steer'); return; }
+      listener?.({ type: 'tool_execution_start', toolName: 'read', args: { path: 'x' } });
+    });
+    const session = { prompt, getLastAssistantText: vi.fn(() => closeout ? JSON.stringify(reviewResult) : 'not ready'), abort: vi.fn(async () => undefined), dispose: vi.fn(), subscribe: vi.fn((fn) => { listener = fn; return () => undefined; }) } as unknown as PiSession;
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, reviewerMaxRepeatedToolCalls: 1, reviewerCloseoutGraceMs: 20, sessionFactory: async () => ({ session }) });
+    await expect(runner.runReviewer({ worktreePath: '/tmp/worktree', task, profile, diff: 'diff', filesChanged: ['src/example.ts'], validation: { passed: true, commands: [], results: [], summary: '', artifacts: [] } })).resolves.toEqual(reviewResult);
+    expect(prompt).toHaveBeenCalledTimes(2); expect(prompt.mock.calls.filter(([text]) => text.includes('Stop inspecting'))).toHaveLength(1); expect(session.abort).not.toHaveBeenCalled();
+  });
+
+  it('aborts after the closeout grace and returns budget failure when the reviewer JSON is invalid', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    let listener: ((event: any) => void) | undefined; let closeout = false;
+    const prompt = vi.fn(async (text: string, options?: { streamingBehavior?: string }) => {
+      if (text.includes('Stop inspecting')) { closeout = true; expect(options?.streamingBehavior).toBe('steer'); return; }
+      listener?.({ type: 'tool_execution_start', toolName: 'read', args: { path: 'x' } });
+    });
+    const getLastAssistantText = vi.fn(() => closeout ? 'ordinary prose' : 'not ready');
+    const abort = vi.fn(async () => undefined);
+    const session = { prompt, getLastAssistantText, abort, dispose: vi.fn(), subscribe: vi.fn((fn) => { listener = fn; return () => undefined; }) } as unknown as PiSession;
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, reviewerMaxRepeatedToolCalls: 1, reviewerCloseoutGraceMs: 5, sessionFactory: async () => ({ session }) });
+    await expect(runner.runReviewer({ worktreePath: '/tmp/worktree', task, profile, diff: 'diff', filesChanged: ['src/example.ts'], validation: { passed: true, commands: [], results: [], summary: '', artifacts: [] } })).rejects.toBeInstanceOf(PiAgentLoopBudgetError);
+    expect(getLastAssistantText).toHaveBeenCalledTimes(1); expect(prompt).toHaveBeenCalledTimes(2); expect(prompt.mock.calls.filter(([text]) => text.includes('Stop inspecting'))).toHaveLength(1); expect(abort).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts a fixer JSON fallback from the single budget closeout steer', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    let listener: ((event: any) => void) | undefined; let closeout = false;
+    const prompt = vi.fn(async (text: string, options?: { streamingBehavior?: string }) => {
+      if (text.includes('Stop inspecting')) { closeout = true; expect(options?.streamingBehavior).toBe('steer'); return; }
+      listener?.({ type: 'tool_execution_start', toolName: 'read', args: { path: 'x' } });
+    });
+    const session = { prompt, getLastAssistantText: vi.fn(() => closeout ? JSON.stringify(fixResult) : 'not ready'), abort: vi.fn(async () => undefined), dispose: vi.fn(), subscribe: vi.fn((fn) => { listener = fn; return () => undefined; }) } as unknown as PiSession;
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, fixerMaxRepeatedToolCalls: 1, fixerCloseoutGraceMs: 20, sessionFactory: async () => ({ session }) });
+    await expect(runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' })).resolves.toEqual(fixResult);
+    expect(prompt).toHaveBeenCalledTimes(2); expect(prompt.mock.calls.filter(([text]) => text.includes('Stop inspecting'))).toHaveLength(1);
   });
 
   it('feeds a validation failure back once and accepts the corrected output', async () => {

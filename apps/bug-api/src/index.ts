@@ -377,7 +377,7 @@ export class BugApiServer {
   }
   private artifactsFor(bugKey: string): Record<string, unknown> {
     const root = typeof this.apiConfig.DATA_ROOT === 'string' ? this.apiConfig.DATA_ROOT : 'data'; const dir = path.resolve(root, 'agent-results', bugKey); const result: Record<string, unknown> = {};
-    try { for (const filename of fs.readdirSync(dir)) { if (!/^(bug|fix-task|environment|agent-result|validation|review|git-result|pipeline)\.json$|^diff\.patch$/.test(filename)) continue; const full = path.join(dir, filename); const stat = fs.statSync(full); if (!stat.isFile() || stat.size > 2_000_000) continue; const content = fs.readFileSync(full, 'utf8'); result[filename] = filename.endsWith('.json') ? JSON.parse(content) : content; } } catch { /* artifacts are optional until a worker starts */ }
+    try { for (const filename of fs.readdirSync(dir)) { if (!/^(bug|fix-task|environment|agent-result|candidate(?:-used)?|validation|review|git-result|pipeline)\.json$|^diff\.patch$/.test(filename)) continue; const full = path.join(dir, filename); const stat = fs.statSync(full); if (!stat.isFile() || stat.size > 2_000_000) continue; const content = fs.readFileSync(full, 'utf8'); result[filename] = filename.endsWith('.json') ? JSON.parse(content) : content; } } catch { /* artifacts are optional until a worker starts */ }
     return result;
   }
   private cancelBug(bug: any, response: http.ServerResponse): void {
@@ -394,7 +394,7 @@ export class BugApiServer {
     send(response, 200, { bug: { ...updated, status: 'CANCELLED' }, job, cancelled: true, status: 'CANCELLED', semantic: running ? 'interrupt_requested' : 'removed_from_queue' });
   }
   private retryBug(bug: any, response: http.ServerResponse): void {
-    const status = this.statusFor(bug); const failedStatuses = ['FIX_FAILED', 'ENVIRONMENT_FAILED', 'VALIDATION_FAILED', 'REVIEW_REJECTED', 'PUSH_FAILED', 'BLOCKED']; const jobs = this.jobsFor(bug); const candidate = [...jobs].reverse().find((job) => job.status === 'FAILED' || job.status === 'INTERRUPTED');
+    const status = this.statusFor(bug); const failedStatuses = ['FIX_FAILED', 'FIX_CANDIDATE', 'ENVIRONMENT_FAILED', 'VALIDATION_FAILED', 'REVIEW_REJECTED', 'PUSH_FAILED', 'BLOCKED']; const jobs = this.jobsFor(bug); const candidate = [...jobs].reverse().find((job) => job.status === 'FAILED' || job.status === 'INTERRUPTED');
     if (!failedStatuses.includes(status) && !candidate) { send(response, 409, { error: 'Manual retry is only available for a failed or interrupted job', status, retryable: false }); return; }
     let job: unknown = null; if (candidate && this.queue?.retryJob) job = this.queue.retryJob(candidate.id);
     let updated = bug; if (failedStatuses.includes(status)) { try { updated = this.repo.changeBugStatus(bug.bugKey, 'QUEUED', 'manual_retry'); } catch { /* queue retry is still returned */ } }

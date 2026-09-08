@@ -76,6 +76,10 @@ INTAKE_LLM_TIMEOUT_MS=60000
 | `INTAKE_CONFIG_PATH` | 必填或使用 `config/bug-intake.md` 默认值。必须是仓库/部署允许根目录内的 Markdown 文件，并执行存在性、大小和 regular-file 校验。 |
 | `FIXER_TIMEOUT_MS` | 正整数，默认 `2_700_000`（45 分钟）；超时必须取消 Pi session，并将 job 标记为失败。 |
 | `REVIEWER_TIMEOUT_MS` | 正整数，默认 `900_000`（15 分钟）；超时必须取消 Reviewer session，并将 job 标记为失败。 |
+| `PI_FIXER_MAX_TURNS` / `PI_REVIEWER_MAX_TURNS` | 正整数，默认 `80`；Agent turn 上限，触发后只允许一次收尾提交。 |
+| `PI_FIXER_MAX_TOOL_CALLS` / `PI_REVIEWER_MAX_TOOL_CALLS` | 正整数，默认 `240`；tool execution 上限。 |
+| `PI_FIXER_MAX_REPEATED_TOOL_CALLS` / `PI_REVIEWER_MAX_REPEATED_TOOL_CALLS` | 正整数，默认 `4`；连续相同 tool 调用阈值。 |
+| `PI_FIXER_CLOSEOUT_GRACE_MS` / `PI_REVIEWER_CLOSEOUT_GRACE_MS` | 正整数，默认 `15_000`；预算触发后等待结构化收尾的短宽限期。 |
 | `INTAKE_LLM_TIMEOUT_MS` | 正整数，默认 `60_000`（60 秒）；同时用于 Intake 和 Document Reconciler 的 OpenAI-compatible 请求，超时必须返回明确的 timeout 错误。 |
 
 已有的 `DATABASE_PATH`、`DATA_ROOT`、`PORT`、`DRY_RUN`、`config/environments.yaml` 等配置仍遵守 WP01/WP04/WP05。Repository 的真实路径由受批准的 profile 配置和部署环境变量提供，不从 Intake 请求中直接读取。
@@ -254,7 +258,7 @@ parseConfig
 提交接口只负责持久化 Bug 和 enqueue；worker 负责消费，不应在 HTTP 请求中同步执行修复。每个 job 继续遵守 WP05 的状态和 gate：
 
 - profile/repository/environment 准备失败：不调用 Fixer，进入 `ENVIRONMENT_FAILED` 或 `BLOCKED`。
-- Fixer 非 `fixed` 或输出无效：进入 `FIX_FAILED`。
+- Fixer 非 `fixed`：进入 `FIX_FAILED`。输出格式失败或超时但捕获到非空 diff 时进入 `FIX_CANDIDATE`，保存带 base commit、SHA-256 和大小校验的候选 patch；它必须经过 deterministic validation 和 Reviewer gate，不能仅凭 patch 自动 push。无 diff 的 fixer 失败仍进入 `FIX_FAILED`。
 - deterministic validation 失败：进入 `VALIDATION_FAILED`，不调用 Reviewer。
 - Reviewer 非 approve、`bugAddressed=false` 或风险 high：进入 `REVIEW_REJECTED`，不得 commit/push。
 - 仅 review gate 通过后才按既有 dry-run/commit/push 逻辑进入 `FIX_READY`/`READY_FOR_HUMAN_REVIEW`。
@@ -268,6 +272,14 @@ parseConfig
 - API 关闭、SIGINT/SIGTERM 必须先停止新 job polling，并等待当前 job 完成或触发 Agent timeout 后再关闭 queue/database。第一版的 queue cancel 不承诺抢占正在进行的 Pi tool call。
 - endpoint 错误、鉴权错误、模型输出无效、Pi tool error、超时和取消都要有稳定的错误分类；对外和日志只展示脱敏消息，不包含 API key、完整 prompt 或敏感附件。
 - Job heartbeat 必须覆盖长时间 Fixer/Reviewer 调用；stale recovery 不能让同一 job 同时运行两个 Agent。
+
+### 9.1 结构化完成与 Agent loop 预算
+
+Fixer session 必须注册宿主捕获的 `submit_fix_result` custom tool。工具参数按严格 `AgentFixResult` 表达，`bugKey` 必须等于当前 task；第一次成功调用成为权威 completion，即使模型随后发送普通散文也不能降级。工具重复提交（包括冲突提交）必须拒绝。endpoint 仍必须支持 tools/function calling；仅当 endpoint 支持 tools 但本轮没有成功调用完成 tool 时，才可以使用单一严格 JSON fallback，不能从混合散文中猜测或抽取结果。
+
+仅在 adapter 输入边界，`riskNotes` 和 `missingInformation` 允许非空 string 转为单元素数组、空 string 转为 `[]`，并记录脱敏的 `contract_repaired` 事件；canonical Zod schema 仍严格要求数组，其他字段和未知键 fail-closed。
+
+Pi session 必须通过 `subscribe` 记录有界且脱敏的 turn/tool start/end、auto-retry 和 compaction 事件。除 45 分钟 hard timeout 外，Fixer/Reviewer 受最大 turns、最大 tool calls、连续重复调用阈值约束。预算触发时最多发送一次收尾提交提示，经过短 grace 后 abort；TCP 连接状态不算进展。默认值和环境变量见 USAGE。
 
 ## 10. 第一版 Bash 风险与后续约束
 

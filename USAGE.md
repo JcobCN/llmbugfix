@@ -51,6 +51,12 @@ cp .env.example .env
 | `DRY_RUN` | `true` | 安全开关；设为 `false` 才允许进入 Git 推送阶段 |
 | `FIXER_TIMEOUT_MS` | `2700000` | 宿主/Agent 适配器使用的修复器超时，45 分钟 |
 | `REVIEWER_TIMEOUT_MS` | `900000` | 宿主/Agent 适配器使用的审查器超时，15 分钟 |
+| `PI_FIXER_MAX_TURNS` | `80` | Fixer 最大 Agent turn 数；达到后只发送一次收尾提交提示 |
+| `PI_FIXER_MAX_TOOL_CALLS` | `240` | Fixer 最大 tool execution 数 |
+| `PI_FIXER_MAX_REPEATED_TOOL_CALLS` | `4` | 连续相同 tool 调用阈值 |
+| `PI_FIXER_CLOSEOUT_GRACE_MS` | `15000` | 预算触发后收尾提交的短宽限期 |
+| `PI_REVIEWER_MAX_TURNS` / `PI_REVIEWER_MAX_TOOL_CALLS` | `80` / `240` | Reviewer 对应 Agent loop 上限 |
+| `PI_REVIEWER_MAX_REPEATED_TOOL_CALLS` / `PI_REVIEWER_CLOSEOUT_GRACE_MS` | `4` / `15000` | Reviewer 对应重复调用和收尾宽限期 |
 | `ENVIRONMENT_TIMEOUT_MS` | `600000` | 宿主传给环境执行器的命令超时，10 分钟 |
 | `PIPELINE_TIMEOUT_MS` | `5400000` | 流程总超时，90 分钟（由宿主负责传递/监管） |
 | `LLM_ENDPOINT_URL` | 空 | OpenAI-compatible base URL；与 `LLM_MODEL` 同时配置后启用真实 Intake 和 Pi worker |
@@ -134,7 +140,7 @@ PI_SANDBOX_PROFILE=external-container-or-host-profile
 
 `PI_SANDBOX_PROFILE` 只控制真实 Pi 修复 worker 是否启用：它必须代表宿主已经实际配置的容器、VM、seccomp/AppArmor 或等效隔离。没有它时，真实 Intake 仍可用于对话和生成 Profile，但 Pi 修复 worker 保持关闭，提交的报告停留在本地队列。系统不需要也不会读取 `E2E_FRONTEND_REPOSITORY`、`FRONTEND_MAIN_REPOSITORY` 或 `BACKEND_MAIN_REPOSITORY` 来完成动态流程。
 
-Endpoint 必须兼容 OpenAI Chat Completions，并支持 tool calls/function calling；Pi 负责完整的 Agent/tool loop。Fixer 可使用 `read/grep/find/ls/edit/write/bash`，Reviewer 只有 `read/grep/find/ls`。两者使用独立的内存 session，不读取服务器用户的全局 Pi extensions、skills、prompts 或 context。
+Endpoint 必须兼容 OpenAI Chat Completions，并支持 tool calls/function calling；Pi 负责完整的 Agent/tool loop。Fixer 可使用 `read/grep/find/ls/edit/write/bash`，另有宿主注册的 `submit_fix_result` 结构化完成 tool；Reviewer 只有 `read/grep/find/ls`。两者使用独立的内存 session，不读取服务器用户的全局 Pi extensions、skills、prompts 或 context。Fixer 的成功 tool 调用是权威结果，之后的普通散文不会降级成功；endpoint 仍必须支持 tool calls，只有本轮支持 tools 但没有调用完成 tool 时才允许兼容 fallback，且仍要求单一严格 JSON。宿主只对 `riskNotes`、`missingInformation` 的 string/空字符串做有限 wire 修复并记录 `contract_repaired`，不会从散文抽取 JSON。
 
 Pi 的内置 `bash` 本身不是系统级 sandbox；Prompt 中的“禁止网络、push、deploy”也只是行为约束。`PI_SANDBOX_PROFILE` 是一个部署声明，不会自行创建隔离：宿主必须实际以受限容器、VM、seccomp/AppArmor 或等效机制运行 worker。未设置时入口 fail-closed，不启动真实 worker。保持 `DRY_RUN=true` 只会禁止最后的 commit/push，并不会替代宿主隔离。
 
@@ -204,7 +210,7 @@ QUEUED → PREPARING_ENV → FIXING → VALIDATING → REVIEWING → FIX_READY
 
 环境准备包括可选的 setup 命令、runtime start 和 health check。Profile 没有 setup 命令时不会执行预设安装；没有 validation 命令时确定性验证列表为空。Pi Fixer 仍可在仓库中检查并运行其认为合适的检查，Pi Reviewer 根据只读的仓库、diff、证据和 validation 结果审查；这只是 Agent 的判断能力，不是对启动、复现或修复成功的保证。配置了 `validationCommands` 时，验证器按顺序执行，不通过即 `VALIDATION_FAILED`。审查必须 approve、确认 Bug 已解决且回归风险不能为 high；否则为 `REVIEW_REJECTED`。dry-run 在 `FIX_READY` 完成队列 Job；非 dry-run 才进入受保护的 `PUSHING`。
 
-失败状态包括 `ENVIRONMENT_FAILED`、`FIX_FAILED`、`VALIDATION_FAILED`、`REVIEW_REJECTED`、`PUSH_FAILED` 和 `BLOCKED`。队列 Job 自身状态为 `QUEUED → RUNNING → COMPLETED/FAILED`，取消为 `CANCELLED`；心跳过期的 RUNNING Job 被标为 `INTERRUPTED`，不会自动重试。
+失败状态包括 `ENVIRONMENT_FAILED`、`FIX_FAILED`、`FIX_CANDIDATE`、`VALIDATION_FAILED`、`REVIEW_REJECTED`、`PUSH_FAILED` 和 `BLOCKED`。Fixer 超时或完成报告格式失败但留下非空 diff 时进入 `FIX_CANDIDATE`：它不是成功，也不会自动 push；候选会保存 `candidate.json`（base commit、patch SHA/大小/原因）和 `diff.patch`，后续人工 retry 在精确 base 上恢复 patch，再继续 validation/reviewer gate。无 diff 的 Fixer 失败仍为 `FIX_FAILED`。队列 Job 自身状态为 `QUEUED → RUNNING → COMPLETED/FAILED`，取消为 `CANCELLED`；心跳过期的 RUNNING Job 被标为 `INTERRUPTED`，不会自动重试。
 
 ## 9. 增加 Environment Profile、Markdown 和 Skill
 
@@ -237,7 +243,7 @@ Content-Type: application/json
 POST /api/bugs/BUG-000001/retry
 ```
 
-只接受失败终态或 `FAILED`/`INTERRUPTED` Job，并明确返回 `automatic: false`。修复前应先处理根因（例如 Profile 路径、依赖缓存、验证命令或 allow-list），确认 worktree/锁文件状态后再重试。对排队或安全运行阶段可使用：
+只接受失败终态（包括 `FIX_CANDIDATE`）或 `FAILED`/`INTERRUPTED` Job，并明确返回 `automatic: false`。候选 retry 不重新运行 Fixer，也不依赖旧 worktree：worker 验证候选 metadata、patch hash/大小和 base commit 后，在新 worktree 使用 `git apply --check --binary` 再应用；任何不匹配都 fail-closed。修复前应先处理根因（例如 Profile 路径、依赖缓存、验证命令或 allow-list），确认 worktree/锁文件状态后再重试。对排队或安全运行阶段可使用：
 
 ```http
 POST /api/bugs/BUG-000001/cancel
@@ -251,11 +257,11 @@ POST /api/bugs/BUG-000001/cancel
 
 ```text
 bug.json          fix-task.json       environment.json
-agent-result.json validation.json     review.json
+agent-result.json candidate.json      validation.json     review.json
 git-result.json   pipeline.json       diff.patch
 ```
 
-实际编排还会写 `environment-run.json` 和（环境成功启动后）`environment-stop.json`，但当前 API 的筛选读取逻辑不把这两个文件列入公开产物响应。JSON 产物记录任务、Agent 结果、验证、审查和 Git 状态；`diff.patch` 是当前 worktree 相对 HEAD 的二进制 diff。文件创建权限为 `0600`，API 读取的单文件上限为 2 MiB。
+实际编排还会写 `environment-run.json` 和（环境成功启动后）`environment-stop.json`，但当前 API 的筛选读取逻辑不把这两个文件列入公开产物响应。JSON 产物记录任务、Agent 结果、候选元数据、验证、审查和 Git 状态；`diff.patch` 是当前 worktree 相对 HEAD 的二进制 diff。候选通过 validation/review 并进入 `FIX_READY` 后，`candidate.json` 会归档为 `candidate-used.json`。文件创建权限为 `0600`，API 读取的单文件上限为 2 MiB。
 
 数据库升级使用 additive SQLite 初始化。升级前备份 `DATABASE_PATH` 和整个 `DATA_ROOT`；不要把附件或产物提交到公共仓库。
 

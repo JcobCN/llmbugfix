@@ -1,13 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { openDatabase, SQLiteBugRepository } from '../packages/bug-repository/src/index.js';
 import { newId } from '../packages/shared/src/index.js';
 import { JobQueue } from '../packages/job-queue/src/index.js';
 import { EnvironmentResolver } from '../packages/environment-resolver/src/index.js';
 import { RepoManager } from '../packages/repo-manager/src/index.js';
 import { EnvironmentRunner } from '../packages/environment-runner/src/index.js';
-import { FakePiRunner } from '../packages/pi-runner/src/index.js';
+import { FakePiRunner, PiAgentRunnerTimeoutError } from '../packages/pi-runner/src/index.js';
 import { Validator } from '../packages/validator/src/index.js';
 import { Orchestrator } from '../apps/orchestrator/src/index.js';
 
@@ -35,6 +36,38 @@ class FakeCommandRunner {
     }
     return { command, args, exitCode: 0, stdout: 'ok\n', stderr: '', timedOut: false, timeout: false, aborted: false };
   }
+}
+
+class CandidateCommandRunner extends FakeCommandRunner {
+  diffOutput = 'diff --git a/index.ts b/index.ts\n+ console.log("fixed");\n';
+  override async run(command: string, args: string[], options: any): Promise<any> {
+    if (args[0] === 'rev-parse') {
+      this.calls.push([command, ...args]);
+      return { command, args, exitCode: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '', timedOut: false, timeout: false, aborted: false };
+    }
+    if (args[0] === 'diff') {
+      this.calls.push([command, ...args]);
+      return { command, args, exitCode: 0, stdout: this.diffOutput, stderr: '', timedOut: false, timeout: false, aborted: false };
+    }
+    return super.run(command, args, options);
+  }
+}
+
+function createPipelineBug(repo: SQLiteBugRepository, title: string) {
+  const user = repo.createUser({ displayName: 'Candidate tester', email: null });
+  const conv = repo.createConversation({ id: newId(), reporterId: user.id, status: 'active', draft: {}, completeness: { score: 85, dimensions: { problem: 25, reproduction: 30, environment: 10, evidence: 10, impact: 10 }, missingCriticalInformation: [], recommendedQuestions: [], readyForSubmission: true } });
+  return repo.createBug({
+    title, productArea: 'ui', component: 'button', bugType: 'functional', executionTarget: 'frontend', environmentProfileId: 'frontend-test', severity: 'medium', actualBehavior: 'Button is stuck', expectedBehavior: 'Button responds',
+    reproduction: { reproducible: true, frequency: 'always', prerequisites: [], steps: ['Open page', 'Click button'], testData: [] }, environment: { environmentName: 'test', appVersion: '1.0', buildNumber: null, commitSha: null, additionalInfo: {} },
+    evidence: { errorMessages: [], stackTraces: [], logs: [], screenshots: [], videos: [], networkTraces: [], jsonFiles: [], otherFiles: [] }, impact: { affectedUsers: 'some', scope: 'some_users', blocksTesting: false, workaroundExists: false, workaround: null }, regression: { isRegression: false, lastKnownGoodVersion: null, suspectedVersion: null }, observations: [], reporterHypotheses: [], reporter: { userId: user.id, displayName: 'Candidate tester' }, intake: { completenessScore: 85, confidence: 1, missingInformation: [], conversationId: conv.id, llmSummary: 'Button issue' },
+  });
+}
+
+function writeCandidateArtifacts(root: string, bugKey: string, baseCommit = 'a'.repeat(40)) {
+  const artifactDir = path.join(root, bugKey); fs.mkdirSync(artifactDir, { recursive: true });
+  const patch = 'diff --git a/index.ts b/index.ts\n'; const candidate = { bugKey, patchFile: 'diff.patch', patchSha256: createHash('sha256').update(patch).digest('hex'), patchBytes: Buffer.byteLength(patch), baseCommit, reason: 'completion_format_failed', createdAt: new Date().toISOString() };
+  fs.writeFileSync(path.join(artifactDir, 'diff.patch'), patch); fs.writeFileSync(path.join(artifactDir, 'candidate.json'), `${JSON.stringify(candidate)}\n`);
+  return { artifactDir, patch, candidate };
 }
 
 function queueBug(repo: SQLiteBugRepository, bugKey: string) {
@@ -486,5 +519,78 @@ environments:
     expect(handled).toBe(true);
 
     expect(getBugStatus(repo, bug.id)).toBe('REVIEW_REJECTED');
+  });
+
+  it('preserves a non-empty diff as FIX_CANDIDATE when fixer times out', async () => {
+    const bug = createPipelineBug(repo, 'Timeout candidate'); queueBug(repo, bug.bugKey); queue.enqueueJob(bug.id, bug.bugKey);
+    const commandRunner = new CandidateCommandRunner(); let reviewerCalls = 0;
+    const agentRunner = { runFixer: async (input: { worktreePath: string }) => { fs.writeFileSync(path.join(input.worktreePath, 'agent-change.txt'), 'real fixer work\n'); throw new PiAgentRunnerTimeoutError('fixer', 1000); }, runReviewer: async () => { reviewerCalls += 1; throw new Error('reviewer is not reached after fixer timeout'); } };
+    const artifactRoot = path.join(dataRootDir, 'agent-results');
+    const orchestrator = new Orchestrator(
+      { DATA_ROOT: dataRootDir } as any, repo, queue, envResolver, new RepoManager({ worktreesRoot: worktreeRootDir, repositoryRoots: [tmpDir, repoDir], allowedRemoteHosts: ['localhost'], commandRunner: commandRunner as any }), new EnvironmentRunner({ commandRunner: commandRunner as any }), agentRunner as any, new Validator(commandRunner as any), { dryRun: false, artifactRoot },
+    );
+
+    expect(await orchestrator.tick()).toBe(true); expect(getBugStatus(repo, bug.id)).toBe('FIX_CANDIDATE'); expect(reviewerCalls).toBe(0);
+    const artifactDir = path.join(artifactRoot, bug.bugKey); const candidate = JSON.parse(fs.readFileSync(path.join(artifactDir, 'candidate.json'), 'utf8'));
+    expect(candidate).toMatchObject({ bugKey: bug.bugKey, reason: 'fixer_timeout', patchFile: 'diff.patch' }); expect(candidate.patchSha256).toMatch(/^[a-f0-9]{64}$/u); expect(fs.readFileSync(path.join(artifactDir, 'diff.patch'), 'utf8')).toContain('diff --git'); expect(commandRunner.calls.some((call) => call[1] === 'push')).toBe(false);
+  });
+
+  it('fails as FIX_FAILED instead of creating a candidate when fixer timeout leaves no diff', async () => {
+    const bug = createPipelineBug(repo, 'Timeout without diff'); queueBug(repo, bug.bugKey); queue.enqueueJob(bug.id, bug.bugKey);
+    const commandRunner = new CandidateCommandRunner(); commandRunner.diffOutput = ''; const agentRunner = { runFixer: async () => { throw new PiAgentRunnerTimeoutError('fixer', 1000); }, runReviewer: async () => { throw new Error('reviewer is not reached'); } };
+    const artifactRoot = path.join(dataRootDir, 'agent-results');
+    const orchestrator = new Orchestrator(
+      { DATA_ROOT: dataRootDir } as any, repo, queue, envResolver, new RepoManager({ worktreesRoot: worktreeRootDir, repositoryRoots: [tmpDir, repoDir], allowedRemoteHosts: ['localhost'], commandRunner: commandRunner as any }), new EnvironmentRunner({ commandRunner: commandRunner as any }), agentRunner as any, new Validator(commandRunner as any), { dryRun: false, artifactRoot },
+    );
+
+    expect(await orchestrator.tick()).toBe(true); expect(getBugStatus(repo, bug.id)).toBe('FIX_FAILED'); const artifactDir = path.join(artifactRoot, bug.bugKey); expect(fs.existsSync(path.join(artifactDir, 'candidate.json'))).toBe(false); expect(fs.existsSync(path.join(artifactDir, 'diff.patch'))).toBe(false);
+  });
+
+  it('recovers a fixer candidate without rerunning the fixer and archives it after both gates', async () => {
+    const bug = createPipelineBug(repo, 'Recover candidate fix'); queueBug(repo, bug.bugKey); queue.enqueueJob(bug.id, bug.bugKey);
+    const { artifactDir } = writeCandidateArtifacts(path.join(dataRootDir, 'agent-results'), bug.bugKey);
+    const commandRunner = new CandidateCommandRunner();
+    const candidateRepoManager = new RepoManager({ worktreesRoot: worktreeRootDir, repositoryRoots: [tmpDir, repoDir], allowedRemoteHosts: ['localhost'], commandRunner: commandRunner as any });
+    let fixerCalls = 0; let reviewerCalls = 0;
+    const agentRunner = {
+      runFixer: async () => { fixerCalls += 1; throw new Error('candidate retry must not call fixer'); },
+      runReviewer: async (input: { filesChanged: string[] }) => { reviewerCalls += 1; expect(input.filesChanged.length).toBeGreaterThan(0); return { verdict: 'approve' as const, bugAddressed: true, regressionRisk: 'low' as const, summary: 'Candidate reviewed', findings: [] }; },
+    };
+    const orchestrator = new Orchestrator(
+      { DATA_ROOT: dataRootDir } as any, repo, queue, envResolver, candidateRepoManager, new EnvironmentRunner({ commandRunner: commandRunner as any }), agentRunner as any, new Validator(commandRunner as any), { dryRun: true, artifactRoot: path.join(dataRootDir, 'agent-results') },
+    );
+
+    expect(await orchestrator.tick()).toBe(true);
+    expect(fixerCalls).toBe(0); expect(reviewerCalls).toBe(1); expect(getBugStatus(repo, bug.id)).toBe('FIX_READY');
+    expect(fs.existsSync(path.join(artifactDir, 'candidate.json'))).toBe(false); expect(fs.existsSync(path.join(artifactDir, 'candidate-used.json'))).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(artifactDir, 'agent-result.json'), 'utf8')).status).toBe('fixed');
+    expect(commandRunner.calls.some((call) => call[1] === 'push')).toBe(false);
+  });
+
+  it('keeps a recovered candidate behind deterministic validation and never invokes reviewer or push on validation failure', async () => {
+    const bug = createPipelineBug(repo, 'Candidate validation failure'); queueBug(repo, bug.bugKey); queue.enqueueJob(bug.id, bug.bugKey);
+    const { artifactDir } = writeCandidateArtifacts(path.join(dataRootDir, 'agent-results'), bug.bugKey);
+    const commandRunner = new CandidateCommandRunner(); let fixerCalls = 0; let reviewerCalls = 0;
+    const failingValidator = { runValidation: async () => ({ passed: false, commands: ['npm test'], summary: 'Validation failed', artifacts: [], results: [{ command: 'npm test', exitCode: 1, passed: false, stdout: '', stderr: 'failure', output: 'failure', timedOut: false, timeout: false }] }) };
+    const agentRunner = { runFixer: async () => { fixerCalls += 1; throw new Error('must not rerun fixer'); }, runReviewer: async () => { reviewerCalls += 1; throw new Error('reviewer must be gated'); } };
+    const orchestrator = new Orchestrator(
+      { DATA_ROOT: dataRootDir } as any, repo, queue, envResolver, new RepoManager({ worktreesRoot: worktreeRootDir, repositoryRoots: [tmpDir, repoDir], allowedRemoteHosts: ['localhost'], commandRunner: commandRunner as any }), new EnvironmentRunner({ commandRunner: commandRunner as any }), agentRunner as any, failingValidator as any, { dryRun: false, artifactRoot: path.join(dataRootDir, 'agent-results') },
+    );
+
+    expect(await orchestrator.tick()).toBe(true); expect(getBugStatus(repo, bug.id)).toBe('VALIDATION_FAILED'); expect(fixerCalls).toBe(0); expect(reviewerCalls).toBe(0);
+    expect(fs.existsSync(path.join(artifactDir, 'candidate.json'))).toBe(true); expect(commandRunner.calls.some((call) => call[1] === 'push')).toBe(false);
+  });
+
+  it('does not push a recovered candidate rejected by the reviewer', async () => {
+    const bug = createPipelineBug(repo, 'Candidate review rejection'); queueBug(repo, bug.bugKey); queue.enqueueJob(bug.id, bug.bugKey);
+    const { artifactDir } = writeCandidateArtifacts(path.join(dataRootDir, 'agent-results'), bug.bugKey);
+    const commandRunner = new CandidateCommandRunner(); let reviewerCalls = 0;
+    const agentRunner = { runFixer: async () => { throw new Error('must not rerun fixer'); }, runReviewer: async () => { reviewerCalls += 1; return { verdict: 'reject' as const, bugAddressed: false, regressionRisk: 'high' as const, summary: 'Candidate rejected', findings: ['unsafe'] }; } };
+    const orchestrator = new Orchestrator(
+      { DATA_ROOT: dataRootDir } as any, repo, queue, envResolver, new RepoManager({ worktreesRoot: worktreeRootDir, repositoryRoots: [tmpDir, repoDir], allowedRemoteHosts: ['localhost'], commandRunner: commandRunner as any }), new EnvironmentRunner({ commandRunner: commandRunner as any }), agentRunner as any, new Validator(commandRunner as any), { dryRun: false, artifactRoot: path.join(dataRootDir, 'agent-results') },
+    );
+
+    expect(await orchestrator.tick()).toBe(true); expect(getBugStatus(repo, bug.id)).toBe('REVIEW_REJECTED'); expect(reviewerCalls).toBe(1);
+    expect(fs.existsSync(path.join(artifactDir, 'candidate.json'))).toBe(true); expect(commandRunner.calls.some((call) => call[1] === 'push')).toBe(false);
   });
 });

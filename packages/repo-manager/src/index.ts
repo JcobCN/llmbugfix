@@ -81,16 +81,10 @@ export class RepoManager {
   }
   private async git(cwd: string, args: string[], timeoutMs = 120_000): Promise<GitOperationResult> { const result = await this.runner.run('git', args, { cwd, timeoutMs }); return result; }
   async fetch(repoDir: string, baseBranch = 'main'): Promise<GitOperationResult> { const repo = this.repoPath(repoDir); return this.git(repo, ['fetch', 'origin', baseBranch]); }
-  async setupWorktree(bugKey: string, repoDirOrUrl: string, branchName = this.createBranchName(bugKey, 'fix'), baseBranch = 'main'): Promise<string> {
-    const repo = this.repoPath(repoDirOrUrl); const expectedBranch = new RegExp(`^ai/${bugKey}-[a-z0-9]+(?:-[a-z0-9]+)*$`); if (!expectedBranch.test(branchName)) throw new Error(`Unsafe branch name: ${branchName}`);
+  private async setupWorktreeFromBase(bugKey: string, repo: string, branchName: string, base: string): Promise<string> {
+    const expectedBranch = new RegExp(`^ai/${bugKey}-[a-z0-9]+(?:-[a-z0-9]+)*$`); if (!expectedBranch.test(branchName)) throw new Error(`Unsafe branch name: ${branchName}`);
     const target = this.worktreePath(bugKey);
-    // Always ask Git to clear the exact validated target. The directory can
-    // already be gone while Git still has a worktree registration or branch
-    // from a failed prior attempt; checking fs.existsSync alone misses that.
     await this.cleanup(target, repo, branchName);
-    let base = `origin/${baseBranch}`; const hasOrigin = await this.git(repo, ['remote', 'get-url', 'origin']); if (hasOrigin.exitCode === 0) { const fetched = await this.fetch(repo, baseBranch); if (fetched.exitCode !== 0) throw new Error(`git fetch failed: ${fetched.stderr}`); } else base = 'HEAD';
-    // A previous cleanup can leave the AI branch after its worktree directory
-    // disappeared. It is safe to recycle only this validated bug branch.
     const existingBranch = await this.git(repo, ['show-ref', '--verify', `refs/heads/${branchName}`]);
     if (existingBranch.exitCode === 0) {
       const removed = await this.git(repo, ['branch', '-D', '--', branchName]);
@@ -98,8 +92,74 @@ export class RepoManager {
     }
     fs.mkdirSync(path.dirname(target), { recursive: true }); const result = await this.git(repo, ['worktree', 'add', '-b', branchName, target, base]); if (result.exitCode !== 0) throw new Error(`git worktree add failed: ${result.stderr}`); return target;
   }
+  async setupWorktree(bugKey: string, repoDirOrUrl: string, branchName = this.createBranchName(bugKey, 'fix'), baseBranch = 'main'): Promise<string> {
+    const repo = this.repoPath(repoDirOrUrl); let base = `origin/${baseBranch}`; const hasOrigin = await this.git(repo, ['remote', 'get-url', 'origin']); if (hasOrigin.exitCode === 0) { const fetched = await this.fetch(repo, baseBranch); if (fetched.exitCode !== 0) throw new Error(`git fetch failed: ${fetched.stderr}`); } else base = 'HEAD'; return this.setupWorktreeFromBase(bugKey, repo, branchName, base);
+  }
+  /** Recreate a candidate against the exact immutable commit that produced it. */
+  async setupWorktreeAtCommit(bugKey: string, repoDirOrUrl: string, branchName: string, baseCommit: string): Promise<string> {
+    const repo = this.repoPath(repoDirOrUrl); if (!/^[a-f0-9]{7,64}$/i.test(baseCommit)) throw new Error('Candidate base commit is invalid');
+    const present = await this.git(repo, ['cat-file', '-e', `${baseCommit}^{commit}`]); if (present.exitCode !== 0) throw new Error(`Candidate base commit is unavailable: ${baseCommit}`);
+    return this.setupWorktreeFromBase(bugKey, repo, branchName, baseCommit);
+  }
   async createWorktree(bugKey: string, repoDirOrUrl: string, branchName?: string, baseBranch = 'main'): Promise<string> { return this.setupWorktree(bugKey, repoDirOrUrl, branchName ?? this.createBranchName(bugKey, 'fix'), baseBranch); }
-  async diff(worktreePath: string): Promise<string> { const result = await this.git(this.checkedWorktree(worktreePath), ['diff', '--binary', 'HEAD']); if (result.exitCode !== 0) throw new Error(result.stderr); return result.stdout; }
+  /**
+   * Run a read-only diff while making untracked files visible to Git. Git's
+   * normal `diff HEAD` omits files created by the fixer (including new
+   * regression tests), so temporarily add intent-to-add entries for exactly
+   * the current untracked paths. Only those empty index entries are removed in
+   * the finally block; file contents are never staged and existing staged
+   * changes are left untouched.
+   */
+  private async withUntrackedIntent<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
+    const listed = await this.git(cwd, ['ls-files', '--others', '--exclude-standard', '-z']);
+    if (listed.exitCode !== 0) throw new Error(listed.stderr || 'Unable to list untracked files');
+    const files = listed.stdout.split('\0').filter(Boolean);
+    if (!files.length) return operation();
+    const intent = await this.git(cwd, ['add', '-N', '--', ...files]);
+    if (intent.exitCode !== 0) throw new Error(intent.stderr || 'Unable to snapshot untracked files');
+    try {
+      return await operation();
+    } finally {
+      const restored = await this.git(cwd, ['reset', '--quiet', '--', ...files]);
+      if (restored.exitCode !== 0) throw new Error(restored.stderr || 'Unable to restore untracked file index state');
+    }
+  }
+  async diff(worktreePath: string): Promise<string> {
+    const cwd = this.checkedWorktree(worktreePath);
+    return this.withUntrackedIntent(cwd, async () => {
+      const result = await this.git(cwd, ['diff', '--binary', 'HEAD']); if (result.exitCode !== 0) throw new Error(result.stderr); return result.stdout;
+    });
+  }
+  /** Return the exact base commit used by a worktree. */
+  async headCommit(worktreePath: string): Promise<string> { const result = await this.git(this.checkedWorktree(worktreePath), ['rev-parse', 'HEAD']); if (result.exitCode !== 0) throw new Error(result.stderr || 'Unable to resolve worktree base commit'); const commit = result.stdout.trim(); if (!commit || commit.length > 128 || /[\0\r\n]/u.test(commit)) throw new Error('Worktree base commit is invalid'); return commit; }
+  /** Derive changed paths from Git; model-reported filesChanged is never authoritative. */
+  async filesChanged(worktreePath: string): Promise<string[]> {
+    const cwd = this.checkedWorktree(worktreePath);
+    return this.withUntrackedIntent(cwd, async () => {
+      const result = await this.git(cwd, ['diff', '--name-only', '-z', 'HEAD']); if (result.exitCode !== 0) throw new Error(result.stderr || 'Unable to list changed files'); return result.stdout.split('\0').filter(Boolean);
+    });
+  }
+  /**
+   * Apply a preserved candidate patch with Git's binary-aware checker. The
+   * patch is written to a server-generated temporary file and passed as one
+   * argv item; no shell redirection or command interpolation is involved.
+   */
+  async applyPatch(worktreePath: string, patch: string, expectedBaseCommit?: string): Promise<void> {
+    const cwd = this.checkedWorktree(worktreePath);
+    const bytes = Buffer.byteLength(patch, 'utf8');
+    if (!bytes || bytes > 10_000_000) throw new Error('Candidate patch size is invalid');
+    const base = await this.headCommit(cwd);
+    if (expectedBaseCommit && base.toLowerCase() !== expectedBaseCommit.toLowerCase()) throw new Error(`Candidate base commit mismatch: expected ${expectedBaseCommit}, got ${base}`);
+    const digest = createHash('sha256').update(patch).digest('hex').slice(0, 24);
+    const temporary = path.join(this.worktreesRoot, `.candidate-${digest}.patch`);
+    fs.writeFileSync(temporary, patch, { encoding: 'utf8', mode: 0o600 });
+    try {
+      const checked = await this.git(cwd, ['apply', '--check', '--binary', '--whitespace=nowarn', '--', temporary]);
+      if (checked.exitCode !== 0) throw new Error(`Candidate patch check failed: ${checked.stderr || checked.stdout}`);
+      const applied = await this.git(cwd, ['apply', '--binary', '--whitespace=nowarn', '--', temporary]);
+      if (applied.exitCode !== 0) throw new Error(`Candidate patch apply failed: ${applied.stderr || applied.stdout}`);
+    } finally { try { fs.unlinkSync(temporary); } catch { /* best effort cleanup of exact temp file */ } }
+  }
   private checkedWorktree(value: string): string { const resolved = path.resolve(value); if (!within(this.worktreesRoot, resolved)) throw new Error(`Worktree is outside configured root: ${value}`); if (!fs.existsSync(resolved)) throw new Error(`Worktree does not exist: ${value}`); return fs.realpathSync.native(resolved); }
   private remoteHost(remote: string): string { try { const normalized = remote.startsWith('git@') ? `ssh://${remote.replace(':', '/')}` : remote; const parsed = new URL(normalized); if (!parsed.hostname) throw new Error('missing host'); return parsed.hostname.toLowerCase(); } catch { throw new Error(`Invalid remote URL: ${remote}`); } }
   private async assertPushSafe(worktreePath: string, branchName: string): Promise<void> { if (!/^ai\/[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branchName) || branchName.includes('..') || branchName.includes('//')) throw new Error(`Only safe ai/* branches may be pushed: ${branchName}`); const leaf = branchName.slice(3); if (this.protectedBranches.some((item) => leaf === item || leaf.startsWith(`${item}/`)) || ['main', 'master', 'develop'].includes(branchName)) throw new Error(`Protected branch cannot be pushed: ${branchName}`); const current = await this.git(worktreePath, ['branch', '--show-current']); if (current.exitCode !== 0 || current.stdout.trim() !== branchName) throw new Error('Current branch does not match requested branch'); const remote = await this.git(worktreePath, ['remote', 'get-url', 'origin']); if (remote.exitCode !== 0) throw new Error('origin remote is required'); const host = this.remoteHost(remote.stdout.trim()); if (!this.allowedRemoteHosts.length || !this.allowedRemoteHosts.includes(host)) throw new Error(`Remote host is not allowed: ${host}`); }

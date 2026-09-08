@@ -28,7 +28,7 @@ export type User = z.infer<typeof UserSchema>;
 
 export const BugStatusSchema = z.enum([
   'DRAFT', 'COLLECTING', 'READY_FOR_CONFIRMATION', 'SUBMITTED', 'TRIAGING', 'QUEUED', 'NEEDS_INFO',
-  'PREPARING_ENV', 'FIXING', 'VALIDATING', 'REVIEWING', 'FIX_READY', 'FIX_FAILED', 'PUSHING',
+  'PREPARING_ENV', 'FIXING', 'FIX_CANDIDATE', 'VALIDATING', 'REVIEWING', 'FIX_READY', 'FIX_FAILED', 'PUSHING',
   'READY_FOR_HUMAN_REVIEW', 'BLOCKED', 'CANCELLED', 'REJECTED', 'ENVIRONMENT_FAILED', 'VALIDATION_FAILED',
   'REVIEW_REJECTED', 'PUSH_FAILED',
 ]);
@@ -103,6 +103,18 @@ export type BugFixTask = z.infer<typeof BugFixTaskSchema>;
 export const AgentFixResultSchema = z.object({ bugKey: z.string().regex(/^BUG-[0-9]{6,}$/), status: z.enum(['fixed', 'blocked', 'not_reproducible', 'failed']), confidence: z.number().min(0).max(1), summary: z.string(), rootCause: nullableString, reproduced: z.boolean(), regressionTestAdded: z.boolean(), filesChanged: z.array(z.string()), riskNotes: z.array(z.string()), blockedReason: nullableString, missingInformation: z.array(z.string()) });
 export type AgentFixResult = z.infer<typeof AgentFixResultSchema>;
 
+/** Metadata for a non-authoritative patch that survived fixer failure/timeout. */
+export const FixCandidateMetadataSchema = z.object({
+  bugKey: z.string().regex(/^BUG-[0-9]{6,}$/),
+  patchFile: z.literal('diff.patch'),
+  patchSha256: z.string().regex(/^[a-f0-9]{64}$/i),
+  patchBytes: z.number().int().positive().max(10_000_000),
+  baseCommit: z.string().regex(/^[a-f0-9]{7,64}$/i),
+  reason: z.enum(['completion_format_failed', 'fixer_timeout', 'fixer_aborted', 'fixer_error']),
+  createdAt: iso,
+}).strict();
+export type FixCandidateMetadata = z.infer<typeof FixCandidateMetadataSchema>;
+
 export const ValidationResultSchema = z.object({ passed: z.boolean(), commands: z.array(z.string()), results: z.array(z.object({ command: z.string(), exitCode: z.number().int(), passed: z.boolean(), output: z.string() })), summary: z.string().default(''), artifacts: z.array(z.string()).default([]) });
 export type ValidationResult = z.infer<typeof ValidationResultSchema>;
 export const ReviewResultSchema = z.object({ verdict: z.enum(['approve', 'reject']), bugAddressed: z.boolean(), regressionRisk: z.enum(['low', 'medium', 'high']), summary: z.string(), findings: z.array(z.string()).default([]) });
@@ -124,6 +136,7 @@ export const jobSchema = JobSchema;
 export const agentRunSchema = AgentRunSchema;
 export const bugFixTaskSchema = BugFixTaskSchema;
 export const agentFixResultSchema = AgentFixResultSchema;
+export const fixCandidateMetadataSchema = FixCandidateMetadataSchema;
 export const validationResultSchema = ValidationResultSchema;
 export const reviewResultSchema = ReviewResultSchema;
 export const gitResultSchema = GitResultSchema;
