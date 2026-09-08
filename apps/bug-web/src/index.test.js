@@ -35,6 +35,76 @@ function executeIntakeClient(responses) {
     new Function('document', 'fetch', 'confirm', script)({ getElementById: (id) => elements.get(id) }, fetchMock, confirmMock);
     return { elements, fetchMock, confirmMock };
 }
+describe('bug detail page', () => {
+    const detailElementIds = ['app', 'view-toggle', 'heading', 'loading', 'markdown-view', 'structured-view'];
+    function executeDetailClient(detail) {
+        const elements = new Map();
+        for (const id of detailElementIds) {
+            const element = {
+                textContent: '', hidden: id !== 'loading', disabled: false, readOnly: false, value: '', href: '',
+                className: '', innerHTML: '', scrollTop: 0, scrollHeight: 0, removed: false, listeners: {},
+                addEventListener(type, listener) { this.listeners[type] = listener; },
+                focus() { }, remove() { },
+            };
+            elements.set(id, element);
+        }
+        const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => detail }));
+        const script = renderDetailHtml('BUG-000123').match(/<script>([\s\S]*)<\/script>/)?.[1];
+        if (!script)
+            throw new Error('Detail client script is missing');
+        new Function('document', 'fetch', script)({ getElementById: (id) => elements.get(id) }, fetchMock);
+        return { elements, fetchMock };
+    }
+    it('embeds a view toggle and both detail views in the page shell', () => {
+        const html = renderDetailHtml('BUG-000001');
+        expect(html).toContain('id="view-toggle"');
+        expect(html).toContain('id="markdown-view"');
+        expect(html).toContain('id="structured-view"');
+        expect(html).toContain("let mode = 'markdown'");
+        expect(html).toContain('renderMarkdown');
+        expect(html).toContain('detail.document && detail.document.content');
+        expect(html).toContain('开发视图（结构化数据）');
+    });
+    it('shows the Markdown report for testers and toggles to structured data for developers', async () => {
+        const detail = {
+            bug: { bugKey: 'BUG-000123', intake: { completenessScore: 70 } },
+            key: 'BUG-000123', status: 'FIX_READY', completeness: 70, branch: 'fix/BUG-000123', commit: 'abc123',
+            document: { content: '# 登录异常\n\n## Actual Behavior\n按钮 **无响应** `<img src=x onerror=alert(1)>`\n\n## Reproduction\n1. 打开登录页\n2. 点击登录\n' },
+            fix: { summary: 'patched' },
+        };
+        const { elements, fetchMock } = executeDetailClient(detail);
+        await vi.waitFor(() => expect(elements.get('markdown-view')?.hidden).toBe(false));
+        expect(fetchMock).toHaveBeenCalledWith('/api/bugs/BUG-000123');
+        const markdown = elements.get('markdown-view').innerHTML;
+        expect(markdown).toContain('<h1>登录异常</h1>');
+        expect(markdown).toContain('<h2>Actual Behavior</h2>');
+        expect(markdown).toContain('<strong>无响应</strong>');
+        expect(markdown).toContain('<ol>');
+        expect(markdown).toContain('<li>打开登录页</li>');
+        expect(markdown).toContain('BUG-000123');
+        expect(markdown).toContain('&lt;img src=x onerror=alert(1)&gt;');
+        expect(markdown).not.toContain('<img');
+        expect(elements.get('structured-view')?.hidden).toBe(true);
+        expect(elements.get('loading')?.hidden).toBe(true);
+        expect(elements.get('heading')?.textContent).toBe('BUG-000123');
+        elements.get('view-toggle')?.onclick?.();
+        expect(elements.get('structured-view')?.hidden).toBe(false);
+        expect(elements.get('markdown-view')?.hidden).toBe(true);
+        expect(elements.get('view-toggle')?.textContent).toContain('测试视图');
+        const structured = elements.get('structured-view').innerHTML;
+        expect(structured).toContain('Fix result');
+        expect(structured).toContain('BUG-000123');
+        elements.get('view-toggle')?.onclick?.();
+        expect(elements.get('markdown-view')?.hidden).toBe(false);
+        expect(elements.get('structured-view')?.hidden).toBe(true);
+    });
+    it('falls back to a hint when the bug has no Markdown document', async () => {
+        const detail = { bug: { bugKey: 'BUG-000001' }, key: 'BUG-000001', status: 'NEEDS_INFO' };
+        const { elements } = executeDetailClient(detail);
+        await vi.waitFor(() => expect(elements.get('markdown-view')?.hidden).toBe(false));
+        expect(elements.get('markdown-view').innerHTML).toContain('暂无 Markdown 报告');
+    });
+});
 describe('conversational intake page', () => {
     it('emits a parseable inline client script', () => {
         const script = renderIndexHtml().match(/<script>([\s\S]*)<\/script>/)?.[1];

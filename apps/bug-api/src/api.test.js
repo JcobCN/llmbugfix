@@ -44,6 +44,7 @@ describe('Bug API routes', () => {
         expect(detail.data.bug.status).toBe('NEEDS_INFO');
         expect(detail.data.progress.status).toBe('NEEDS_INFO');
         expect(detail.data.messages.length).toBeGreaterThan(0);
+        expect(detail.data.document.content).toMatch(/^# /u);
         expect((await server.inject({ url: '/api/health/live' })).status).toBe(200);
         expect((await server.inject({ url: '/api/health/ready' })).status).toBe(200);
         const cancelled = await server.inject({ method: 'POST', url: `/api/bugs/${submitted.data.bugKey}/cancel` });

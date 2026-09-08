@@ -681,11 +681,18 @@ export class BugApiServer {
         let conversation = null;
         let messages = [];
         if (bug.intake?.conversationId) {
-            const value = this.repo.getConversation(bug.intake.conversationId);
-            conversation = value;
-            if (value)
-                messages = this.repo.listMessages(value.id);
+            conversation = this.repo.getConversation(bug.intake.conversationId);
+            if (conversation)
+                messages = this.repo.listMessages(conversation.id);
         }
+        const document = (() => {
+            if (bug.intake?.conversationId) {
+                const snapshot = this.readDocument(bug.intake.conversationId);
+                if (snapshot)
+                    return snapshot;
+            }
+            return conversation ? { content: mergeBugDocument('', conversation.draft ?? {}, conversation.completeness), revision: null, sha256: null, syncStatus: 'generated' } : null;
+        })();
         const attachments = (() => { try {
             return this.repo.listAttachments(bug.bugKey);
         }
@@ -696,7 +703,7 @@ export class BugApiServer {
         const git = artifactData['git-result.json'];
         const status = this.statusFor(bug);
         const publicBug = { ...bug, status };
-        return { bug: publicBug, key: bug.bugKey, title: bug.title, summary: bug.intake?.llmSummary ?? bug.actualBehavior, profile: bug.environmentProfileId, target: bug.executionTarget, reproduction: bug.reproduction, environment: bug.environment, evidence: bug.evidence, attachments, conversation, messages, completeness: bug.intake?.completenessScore ?? 0, progress: { status, jobs }, fix: artifactData['agent-result.json'] ?? null, validation: artifactData['validation.json'] ?? null, review: artifactData['review.json'] ?? null, branch: git?.branch ?? null, commit: git?.commitSha ?? null, artifacts: Object.keys(artifactData), status };
+        return { bug: publicBug, key: bug.bugKey, title: bug.title, summary: bug.intake?.llmSummary ?? bug.actualBehavior, profile: bug.environmentProfileId, target: bug.executionTarget, document, reproduction: bug.reproduction, environment: bug.environment, evidence: bug.evidence, attachments, conversation, messages, completeness: bug.intake?.completenessScore ?? 0, progress: { status, jobs }, fix: artifactData['agent-result.json'] ?? null, validation: artifactData['validation.json'] ?? null, review: artifactData['review.json'] ?? null, branch: git?.branch ?? null, commit: git?.commitSha ?? null, artifacts: Object.keys(artifactData), status };
     }
     artifactsFor(bugKey) {
         const root = typeof this.apiConfig.DATA_ROOT === 'string' ? this.apiConfig.DATA_ROOT : 'data';

@@ -177,7 +177,7 @@ Content-Type: application/json
 宿主挂载页面后：
 
 - `/dashboard` 使用 `renderDashboardHtml()`，通过 `GET /api/bugs` 加载列表，支持 `q`（Key/标题搜索）、`target` 和 `status` 过滤。
-- `/bugs/:id` 使用 `renderDetailHtml(id)`，通过 `GET /api/bugs/:id` 加载摘要、复现、环境、证据、附件、会话消息、进度、修复、验证、审查和分支/提交信息。
+- `/bugs/:id` 使用 `renderDetailHtml(id)`，通过 `GET /api/bugs/:id` 加载摘要、复现、环境、证据、附件、会话消息、进度、修复、验证、审查和分支/提交信息。详情页默认以 Markdown 文档形式展示报告（面向测试人员，数据来自响应中的 `document` 字段），页面右上角的“开发视图（结构化数据）”按钮可切换回结构化数据视图供开发人员查看细节。
 - `GET /api/bugs/:id/progress` 返回当前状态、全部 Job 和最新 Job。
 - `GET /api/bugs/:id/artifacts` 返回当前可读产物文件名和内容；尚未运行到的阶段返回空或缺失是正常现象。
 - `GET /api/environments` 返回已加载 Profile（包括静态目录和确认提交后生成的 Profile）。

@@ -47,11 +47,12 @@ describe('Bug API routes', () => {
     expect((list.data.bugs[0] as { key: string }).key).toMatch(/^BUG-/);
     const filtered = await server.inject<{ bugs: unknown[] }>({ url: '/api/bugs?target=frontend&status=NEEDS_INFO' });
     expect(filtered.data.bugs).toHaveLength(1);
-    const detail = await server.inject<{ bug: { status: string }; progress: { status: string }; messages: unknown[] }>({ url: `/api/bugs/${submitted.data.bugKey}` });
+    const detail = await server.inject<{ bug: { status: string }; progress: { status: string }; messages: unknown[]; document: { content: string } }>({ url: `/api/bugs/${submitted.data.bugKey}` });
     expect(detail.status).toBe(200);
     expect(detail.data.bug.status).toBe('NEEDS_INFO');
     expect(detail.data.progress.status).toBe('NEEDS_INFO');
     expect(detail.data.messages.length).toBeGreaterThan(0);
+    expect(detail.data.document.content).toMatch(/^# /u);
     expect((await server.inject({ url: '/api/health/live' })).status).toBe(200);
     expect((await server.inject({ url: '/api/health/ready' })).status).toBe(200);
     const cancelled = await server.inject<{ bug: { status: string }; semantic: string }>({ method: 'POST', url: `/api/bugs/${submitted.data.bugKey}/cancel` });
