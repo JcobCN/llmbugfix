@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { FakePiRunner, PiAgentRunner, PiAgentRunnerTimeoutError, parseAgentJson, type PiSession, type PiSessionFactoryOptions } from './index.js';
+import { FakePiRunner, PiAgentRunner, PiAgentOutputFormatError, PiAgentRunnerTimeoutError, parseAgentJson, type PiSession, type PiSessionFactoryOptions } from './index.js';
 import type { BugFixTask } from '@llmbugfix/bug-domain';
 import type { EnvironmentProfile } from '@llmbugfix/environment-resolver';
 
@@ -155,5 +155,23 @@ describe('PiAgentRunner', () => {
     const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, sessionFactory: async (options) => { sessionOptions.push(options); return { session: sessionReturning(JSON.stringify(fixResult)) }; } });
     await runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' });
     expect(sessionOptions[0].customTools).toBeUndefined();
+  });
+
+  it('feeds a validation failure back once and accepts the corrected output', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    const outputs = [`修好了，详情如下：\n${JSON.stringify(fixResult)}`, JSON.stringify(fixResult)];
+    const prompt = vi.fn(async () => undefined);
+    const session = { prompt, getLastAssistantText: vi.fn(() => outputs.shift()), abort: vi.fn(async () => undefined), dispose: vi.fn() } as unknown as PiSession;
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, sessionFactory: async () => ({ session }) });
+    await expect(runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' })).resolves.toEqual(fixResult);
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws PiAgentOutputFormatError with the raw output after a failed correction', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    const bad = 'prose with no JSON at all';
+    const session = { prompt: vi.fn(async () => undefined), getLastAssistantText: vi.fn(() => bad), abort: vi.fn(async () => undefined), dispose: vi.fn() } as unknown as PiSession;
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, sessionFactory: async () => ({ session }) });
+    await expect(runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' })).rejects.toMatchObject({ name: 'PiAgentOutputFormatError', rawOutput: bad, validationError: expect.stringMatching(/exactly one JSON object/) });
   });
 });

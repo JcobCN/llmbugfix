@@ -6,7 +6,7 @@ import { JobQueue, type QueueJob } from '@llmbugfix/job-queue';
 import { EnvironmentResolver, type EnvironmentProfile } from '@llmbugfix/environment-resolver';
 import { RepoManager } from '@llmbugfix/repo-manager';
 import { EnvironmentRunner } from '@llmbugfix/environment-runner';
-import { FakePiRunner, type AgentRunner } from '@llmbugfix/pi-runner';
+import { FakePiRunner, PiAgentOutputFormatError, type AgentRunner } from '@llmbugfix/pi-runner';
 import { Validator, DeterministicValidationSchema, type DeterministicValidation } from '@llmbugfix/validator';
 import { BugFixTaskSchema, AgentFixResultSchema, ReviewResultSchema, GitResultSchema, type AttachmentRef, type BugFixTask, type BugReport } from '@llmbugfix/bug-domain';
 
@@ -53,7 +53,7 @@ export class Orchestrator {
     const heartbeatTimer = setInterval(() => { try { const job = this.queue.getJob(jobId); if (job.status === 'RUNNING' && job.workerId === workerId) this.queue.heartbeat(jobId, workerId); } catch (error) { logger.warn({ bugKey: bug.bugKey, error: error instanceof Error ? error.message : String(error) }, 'Job heartbeat failed'); } }, 15_000); heartbeatTimer.unref();
     const artifactDir = path.join(this.options.artifactRoot, bug.bugKey); fs.mkdirSync(artifactDir, { recursive: true }); const pipeline: PipelineArtifact = { bugKey: bug.bugKey, status: 'RUNNING', startedAt: now() }; this.writeArtifact(artifactDir, 'pipeline.json', pipeline);
     const cancellation = new AbortController(); const cancellationTimer = setInterval(() => { try { const current = this.queue.getJob(jobId); const row = this.repo.database.prepare('SELECT status FROM bug_reports WHERE id = ? OR bug_key = ?').get(bugId, bugId) as { status?: string } | undefined; if (current.status === 'CANCELLED' || row?.status === 'CANCELLED') cancellation.abort(); } catch { /* final checkpoint handles missing jobs */ } }, 250); cancellationTimer.unref();
-    let worktreePath: string | undefined; let profile: EnvironmentProfile | undefined; let environmentPrepared = false; let pushing = false; let branch: string | undefined;
+    let worktreePath: string | undefined; let profile: EnvironmentProfile | undefined; let environmentPrepared = false; let pushing = false; let branch: string | undefined; let keepWorktree = false;
     try {
       this.checkpoint(jobId, bugId); this.queue.heartbeat(jobId, workerId); await this.transition(bug, 'PREPARING_ENV'); this.checkpoint(jobId, bugId);
       const resolved = this.envResolver.resolveProfile(bug.executionTarget, bug.environmentProfileId ?? undefined); profile = resolved.profile; const attachments = this.attachmentsFor(bug); const task = this.taskFor(bug, profile, attachments);
@@ -78,11 +78,22 @@ export class Orchestrator {
     } catch (error) {
       const cancelled = error instanceof PipelineCancelledError || cancellation.signal.aborted || (() => { try { const row = this.repo.database.prepare('SELECT status FROM bug_reports WHERE id = ? OR bug_key = ?').get(bugId, bugId) as { status?: string } | undefined; return this.queue.getJob(jobId).status === 'CANCELLED' || row?.status === 'CANCELLED'; } catch { return true; } })();
       if (cancelled) { pipeline.status = 'CANCELLED'; pipeline.error = null; return; }
-      const message = error instanceof Error ? error.message : String(error); logger.error({ bugKey: bug.bugKey, error: message }, 'Pipeline failed'); try { await this.transition(bug, pushing ? 'PUSH_FAILED' : 'FIX_FAILED', { error: message }); } catch { /* preserve original error */ } try { this.queue.failJob(jobId, message, workerId); } catch { /* a concurrent cancellation owns the terminal state */ } pipeline.status = pushing ? 'PUSH_FAILED' : 'FAILED'; pipeline.error = message;
+      const message = error instanceof Error ? error.message : String(error); logger.error({ bugKey: bug.bugKey, error: message }, 'Pipeline failed');
+      // Preserve evidence before the failure is reported: the agent may have
+      // produced real work whose final report alone was malformed. A retry
+      // unregisters and recreates this worktree, so keeping it is safe.
+      if (worktreePath && profile) {
+        if (error instanceof PiAgentOutputFormatError) this.writeRawArtifact(artifactDir, 'agent-raw-output.txt', error.rawOutput);
+        try {
+          const failureDiff = await this.repoManager.diff(worktreePath);
+          if (failureDiff.trim()) { this.writeRawArtifact(artifactDir, 'diff.patch', failureDiff); keepWorktree = true; }
+        } catch { /* best-effort evidence capture must not mask the failure */ }
+      }
+      try { await this.transition(bug, pushing ? 'PUSH_FAILED' : 'FIX_FAILED', { error: message }); } catch { /* preserve original error */ } try { this.queue.failJob(jobId, message, workerId); } catch { /* a concurrent cancellation owns the terminal state */ } pipeline.status = pushing ? 'PUSH_FAILED' : 'FAILED'; pipeline.error = message;
     } finally {
       clearInterval(heartbeatTimer); clearInterval(cancellationTimer);
       if (worktreePath && profile && environmentPrepared) { try { const stop = await this.envRunner.stopEnvironment(worktreePath, profile); this.writeArtifact(artifactDir, 'environment-stop.json', stop); } catch { /* cleanup must not hide pipeline result */ } }
-      if (worktreePath && profile) { try { await this.repoManager.cleanup(worktreePath, profile.repository, branch); } catch { /* cleanup must not hide pipeline result */ } }
+      if (worktreePath && profile && !keepWorktree) { try { await this.repoManager.cleanup(worktreePath, profile.repository, branch); } catch { /* cleanup must not hide pipeline result */ } }
       pipeline.finishedAt = now(); this.writeArtifact(artifactDir, 'pipeline.json', pipeline);
     }
   }

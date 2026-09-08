@@ -36,6 +36,21 @@ const StrictReviewResultSchema = ReviewResultSchema.strict();
 export type AgentFixResultChecked = z.infer<typeof StrictFixResultSchema>;
 export type ReviewResultChecked = z.infer<typeof StrictReviewResultSchema>;
 
+/** Minimal structural logger so callers can pass a pino logger without a package dependency. */
+export type PiRunnerLogger = { info: (obj: object, msg: string) => void; error: (obj: object, msg: string) => void };
+
+/**
+ * Thrown when an agent's final text cannot be parsed into the contract JSON
+ * even after one correction attempt. The raw output is preserved so callers
+ * can persist it as forensic evidence instead of losing the agent's work.
+ */
+export class PiAgentOutputFormatError extends Error {
+  constructor(readonly role: 'fixer' | 'reviewer', readonly rawOutput: string, readonly validationError: string) {
+    super(`Pi ${role} output failed contract validation after one correction attempt: ${validationError}`);
+    this.name = 'PiAgentOutputFormatError';
+  }
+}
+
 export interface FixerInput {
   worktreePath: string;
   task: BugFixTask;
@@ -70,7 +85,7 @@ export const REVIEWER_TOOLS = ['read', 'grep', 'find', 'ls'] as const;
 const PROVIDER_ID = 'llmbugfix';
 const DEFAULT_FIXER_TIMEOUT_MS = 2_700_000;
 const DEFAULT_REVIEWER_TIMEOUT_MS = 900_000;
-const DEFAULT_MAX_TOKENS = 16_384;
+const DEFAULT_MAX_TOKENS = 32_768;
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 
 /**
@@ -147,6 +162,8 @@ export interface PiAgentRunnerOptions {
    * Bash confinement is the wrapper's responsibility (see bashShellPath).
    */
   confineWorkspace?: boolean;
+  /** Optional structural logger for prompt/validation diagnostics. */
+  logger?: PiRunnerLogger;
 }
 
 export class PiAgentRunnerTimeoutError extends Error {
@@ -257,6 +274,7 @@ export class PiAgentRunner implements AgentRunner {
   private readonly sandboxProfile?: string;
   private readonly bashShellPath?: string;
   private readonly confineWorkspace: boolean;
+  private readonly logger?: PiRunnerLogger;
   private runtimePromise?: Promise<PiModelRuntime>;
 
   constructor(options: PiAgentRunnerOptions = {}) {
@@ -287,6 +305,7 @@ export class PiAgentRunner implements AgentRunner {
     this.sandboxProfile = options.sandboxProfile ?? process.env.PI_SANDBOX_PROFILE;
     this.bashShellPath = options.bashShellPath?.trim() || undefined;
     this.confineWorkspace = options.confineWorkspace ?? false;
+    this.logger = options.logger;
   }
 
   /**
@@ -383,10 +402,33 @@ export class PiAgentRunner implements AgentRunner {
     const timeoutMs = role === 'fixer' ? this.fixerTimeoutMs : this.reviewerTimeoutMs;
     try {
       const operation = (async () => {
+        this.logger?.info({ role, cwd, prompt }, `pi ${role} session prompt`);
         await session.prompt(prompt, { expandPromptTemplates: false, source: 'rpc' });
-        const output = await session.getLastAssistantText();
-        if (output === undefined || output === null) throw new Error(`Pi ${role} session returned no assistant text`);
-        return schema.parse(parseAgentJson(output));
+        // One correction attempt mirrors the intake model: a malformed final
+        // answer is fed back to the same session so the agent can re-emit the
+        // contract JSON without redoing its investigation.
+        let lastOutput = '';
+        let lastValidationError = '';
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const output = await session.getLastAssistantText();
+          if (output === undefined || output === null) throw new Error(`Pi ${role} session returned no assistant text`);
+          lastOutput = output;
+          try {
+            return schema.parse(parseAgentJson(output));
+          } catch (error) {
+            lastValidationError = error instanceof z.ZodError ? error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('\n') : error instanceof Error ? error.message : String(error);
+            this.logger?.error({ role, attempt: attempt + 1, validationError: lastValidationError, content: output }, `pi ${role} output failed validation`);
+            if (attempt === 0) {
+              await session.prompt([
+                `Your previous response failed output validation:\n${lastValidationError}`,
+                'Reply again with exactly one JSON object (a single fenced ```json block is also accepted) matching the required schema and no surrounding prose.',
+                'Every required field must be present with the correct type. Array fields must always be JSON arrays: wrap prose values like ["note"] instead of "note", and use [] when empty.',
+                'Do not invent facts to satisfy validation.',
+              ].join('\n'), { expandPromptTemplates: false, source: 'rpc' });
+            }
+          }
+        }
+        throw new PiAgentOutputFormatError(role, lastOutput, lastValidationError);
       })();
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {

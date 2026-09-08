@@ -135,6 +135,7 @@ if (llmEnabled) {
       sandboxProfile,
       bashShellPath: process.env.PI_BASH_SHELL?.trim() || undefined,
       confineWorkspace: process.env.PI_CONFINE_WORKSPACE === '1',
+      ...(intakeLlmLogger ? { logger: createLogger('pi-agent') } : {}),
     });
     orchestrator = new Orchestrator(config, repo, queue, environmentResolver, repoManager, environmentRunner, agentRunner, new Validator(commandRunner), { dryRun: process.env.DRY_RUN !== 'false' });
   }

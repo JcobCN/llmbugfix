@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createLogger, now } from '@llmbugfix/shared';
-import { FakePiRunner } from '@llmbugfix/pi-runner';
+import { FakePiRunner, PiAgentOutputFormatError } from '@llmbugfix/pi-runner';
 import { Validator, DeterministicValidationSchema } from '@llmbugfix/validator';
 import { BugFixTaskSchema, AgentFixResultSchema, ReviewResultSchema, GitResultSchema } from '@llmbugfix/bug-domain';
 const logger = createLogger('orchestrator');
@@ -111,6 +111,7 @@ export class Orchestrator {
         let environmentPrepared = false;
         let pushing = false;
         let branch;
+        let keepWorktree = false;
         try {
             this.checkpoint(jobId, bugId);
             this.queue.heartbeat(jobId, workerId);
@@ -216,6 +217,21 @@ export class Orchestrator {
             }
             const message = error instanceof Error ? error.message : String(error);
             logger.error({ bugKey: bug.bugKey, error: message }, 'Pipeline failed');
+            // Preserve evidence before the failure is reported: the agent may have
+            // produced real work whose final report alone was malformed. A retry
+            // unregisters and recreates this worktree, so keeping it is safe.
+            if (worktreePath && profile) {
+                if (error instanceof PiAgentOutputFormatError)
+                    this.writeRawArtifact(artifactDir, 'agent-raw-output.txt', error.rawOutput);
+                try {
+                    const failureDiff = await this.repoManager.diff(worktreePath);
+                    if (failureDiff.trim()) {
+                        this.writeRawArtifact(artifactDir, 'diff.patch', failureDiff);
+                        keepWorktree = true;
+                    }
+                }
+                catch { /* best-effort evidence capture must not mask the failure */ }
+            }
             try {
                 await this.transition(bug, pushing ? 'PUSH_FAILED' : 'FIX_FAILED', { error: message });
             }
@@ -237,7 +253,7 @@ export class Orchestrator {
                 }
                 catch { /* cleanup must not hide pipeline result */ }
             }
-            if (worktreePath && profile) {
+            if (worktreePath && profile && !keepWorktree) {
                 try {
                     await this.repoManager.cleanup(worktreePath, profile.repository, branch);
                 }
