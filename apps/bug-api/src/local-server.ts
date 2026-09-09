@@ -96,7 +96,8 @@ if (llmEnabled) {
   const worktreesRoot = path.resolve(config.DATA_ROOT, 'worktrees');
   const repositoriesRoot = path.resolve(config.DATA_ROOT, 'repositories');
   const repositories = profiles.map((profile) => profile.repository);
-  const repoManager = new RepoManager({ worktreesRoot, repositoryRoots: repositories, cloneRoot: repositoriesRoot });
+  const allowedRemoteHosts = (process.env.GIT_ALLOWED_HOSTS ?? '').split(',').map((h) => h.trim()).filter(Boolean);
+  const repoManager = new RepoManager({ worktreesRoot, repositoryRoots: repositories, cloneRoot: repositoriesRoot, allowedRemoteHosts });
   for (const repository of repositories) repoManager.validateRepoUrl(repository);
   const validBranch = (value: string): boolean => /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/u.test(value) && !value.includes('..') && !value.includes('//') && !value.endsWith('/');
   environments = {

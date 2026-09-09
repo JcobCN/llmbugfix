@@ -118,3 +118,15 @@
 - 修复链路走通：FIXING → VALIDATING → REVIEWING → `FIX_READY`，reviewer approve（regressionRisk: low）；
 - fixer/reviewer 首次输出夹带散文，回喂校验错误后第二次通过（纠错回路生效）；
 - 九件套产物齐全；`DRY_RUN` 下无 commit/push，远端仓库无改动。
+
+## 2026-09-09 已执行记录（push 测试，DRY_RUN=false）
+
+- 复刻同一对话（store tab 切换无反应），3 轮 → score 70 → 提交 → `BUG-000004` 入队；
+- 首轮 push 失败：`Remote host is not allowed: 172.29.100.126`；
+- 排查发现两个代码 bug：
+  1. `packages/repo-manager/src/index.ts` 的 `assertPushSafe` 用 `!this.allowedRemoteHosts.length` 导致空数组时也抛错（其他检查用 `this.allowedRemoteHosts.length &&` 空则跳过）；
+  2. `apps/bug-api/src/local-server.ts` 未将 `GIT_ALLOWED_HOSTS` 传给 `RepoManager` 构造函数；
+- 修复后重试，Pipeline 走通：QUEUED → FIXING → REVIEWING → PUSHING → `READY_FOR_HUMAN_REVIEW`；
+- 远端验证：`refs/heads/ai/BUG-000004-module-tab` 已推送，commit `7bf953f`，message `fix(BUG-000004): 点击 module 分类 tab 切换无反应`；
+- `git-result.json`：`pushed: true`，`review.json`：`verdict: approve`；
+- 修复了 `Title.ose`（声明+绑定 id）和 `CatalogAnchor.ose`（滚动容器健壮性）。
