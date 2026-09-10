@@ -324,6 +324,24 @@ export class BugApiServer {
         try { document = await this.persistGeneratedDocument(conversation.id, document, mergeBugDocument(document.content, draft, completenessForDocument)); } catch (error) { if (error instanceof DocumentRevisionConflictError) { send(response, 409, { error: error.code, code: error.code, document: error.snapshot }); return; } throw error; }
       }
     }
+    // Intake is authoritative at the submission boundary. Evaluate the same
+    // policy used by the conversation pipeline before doing any provisioning
+    // or creating a Bug row; a high score alone is not sufficient when a core
+    // fact is still missing.
+    const completeness = evaluateCompleteness(draft);
+    if (!completeness.readyForConfirmation || completeness.score < 65) {
+      const updated = updateConversation(this.repo, conversation.id, draft, completeness, 'active');
+      send(response, 422, {
+        error: '补充所有必填信息后才能提交 Bug',
+        code: 'INTAKE_INCOMPLETE',
+        status: updated.status,
+        completeness,
+        draft: updated.draft,
+        conversation: conversationResponse(this.repo, updated, this.readDocument(conversation.id)),
+        ...this.documentResponse(conversation.id, document),
+      });
+      return;
+    }
     if (this.environments?.provisionProfile && draft.environmentProfile?.repositoryUrl) {
       const target = draft.executionTarget === 'frontend' || draft.executionTarget === 'backend'
         ? draft.executionTarget : draft.environmentProfile.target;
@@ -335,7 +353,7 @@ export class BugApiServer {
         send(response, 422, { error: error instanceof Error ? error.message : String(error), code: 'REPOSITORY_CLONE_FAILED' }); return;
       }
     }
-    const completeness = evaluateCompleteness(draft); const user = this.repo.getUser(conversation.reporterId); if (!user) { send(response, 500, { error: 'Reporter not found' }); return; }
+    const finalCompleteness = evaluateCompleteness(draft); const user = this.repo.getUser(conversation.reporterId); if (!user) { send(response, 500, { error: 'Reporter not found' }); return; }
     if (this.environments?.resolveProfile) {
       if (!draft.environmentProfileId) { send(response, 422, { error: '请提供项目的 Git 仓库远程地址，或选择已有项目配置后再提交', code: 'ENVIRONMENT_PROFILE_REQUIRED', environments: this.environments.listProfiles() }); return; }
       try { this.environments.resolveProfile(draft.executionTarget ?? 'unknown', draft.environmentProfileId); }
@@ -345,11 +363,11 @@ export class BugApiServer {
     const evidence = { errorMessages: draft.evidence?.errorMessages ?? [], stackTraces: draft.evidence?.stackTraces ?? [], logs: draft.evidence?.logs ?? [], screenshots: draft.evidence?.screenshots ?? [], videos: draft.evidence?.videos ?? [], networkTraces: draft.evidence?.networkTraces ?? [], jsonFiles: draft.evidence?.jsonFiles ?? [], otherFiles: draft.evidence?.otherFiles ?? [] };
     const impact = { affectedUsers: draft.impact?.affectedUsers ?? null, scope: draft.impact?.scope ?? 'unknown', blocksTesting: draft.impact?.blocksTesting ?? null, workaroundExists: draft.impact?.workaroundExists ?? null, workaround: draft.impact?.workaround ?? null };
     const regression = { isRegression: draft.regression?.isRegression ?? null, lastKnownGoodVersion: draft.regression?.lastKnownGoodVersion ?? null, suspectedVersion: draft.regression?.suspectedVersion ?? null };
-    const report = BugReportSchema.parse({ id: newId(), bugKey: `BUG-${Date.now()}`, title: draft.title ?? 'Unspecified bug', productArea: draft.productArea ?? null, component: draft.component ?? null, bugType: draft.bugType ?? 'unknown', executionTarget: draft.executionTarget ?? 'unknown', environmentProfileId: draft.environmentProfileId ?? null, severity: draft.severity ?? 'unknown', actualBehavior: draft.actualBehavior ?? 'Not provided', expectedBehavior: draft.expectedBehavior ?? null, reproduction: { reproducible: draft.reproduction?.reproducible ?? null, frequency: draft.reproduction?.frequency ?? 'unknown', prerequisites: draft.reproduction?.prerequisites ?? [], steps: draft.reproduction?.steps ?? [], testData: draft.reproduction?.testData ?? [] }, environment, evidence, impact, regression, observations: draft.observations ?? [], reporterHypotheses: draft.reporterHypotheses ?? [], reporter: { userId: user.id, displayName: user.displayName }, intake: { completenessScore: completeness.score, confidence: 0.5, missingInformation: completeness.missingCriticalInformation, conversationId: conversation.id, llmSummary: draft.actualBehavior ?? '' }, createdAt: now(), updatedAt: now() });
+    const report = BugReportSchema.parse({ id: newId(), bugKey: `BUG-${Date.now()}`, title: draft.title ?? 'Unspecified bug', productArea: draft.productArea ?? null, component: draft.component ?? null, bugType: draft.bugType ?? 'unknown', executionTarget: draft.executionTarget ?? 'unknown', environmentProfileId: draft.environmentProfileId ?? null, severity: draft.severity ?? 'unknown', actualBehavior: draft.actualBehavior ?? 'Not provided', expectedBehavior: draft.expectedBehavior ?? null, reproduction: { reproducible: draft.reproduction?.reproducible ?? null, frequency: draft.reproduction?.frequency ?? 'unknown', prerequisites: draft.reproduction?.prerequisites ?? [], steps: draft.reproduction?.steps ?? [], testData: draft.reproduction?.testData ?? [] }, environment, evidence, impact, regression, observations: draft.observations ?? [], reporterHypotheses: draft.reporterHypotheses ?? [], reporter: { userId: user.id, displayName: user.displayName }, intake: { completenessScore: finalCompleteness.score, confidence: 0.5, missingInformation: finalCompleteness.missingCriticalInformation, conversationId: conversation.id, llmSummary: draft.actualBehavior ?? '' }, createdAt: now(), updatedAt: now() });
     const created = this.repo.createBug({ ...report, id: undefined, bugKey: undefined } as unknown as Parameters<BugRepository['createBug']>[0]); const afterSubmit = (() => { try { return this.repo.changeBugStatus(created.bugKey, 'COLLECTING'); } catch { return created; } })();
-    let final = afterSubmit; let finalStatus: string = 'DRAFT'; try { final = this.repo.changeBugStatus(created.bugKey, 'READY_FOR_CONFIRMATION'); finalStatus = 'READY_FOR_CONFIRMATION'; final = this.repo.changeBugStatus(created.bugKey, 'SUBMITTED'); finalStatus = 'SUBMITTED'; final = this.repo.changeBugStatus(created.bugKey, 'TRIAGING'); finalStatus = 'TRIAGING'; const desired = completeness.score >= 65 ? 'QUEUED' : 'NEEDS_INFO'; final = this.repo.changeBugStatus(created.bugKey, desired); finalStatus = desired; } catch { /* repositories may expose a reduced state machine */ }
+    let final = afterSubmit; let finalStatus: string = 'DRAFT'; try { final = this.repo.changeBugStatus(created.bugKey, 'READY_FOR_CONFIRMATION'); finalStatus = 'READY_FOR_CONFIRMATION'; final = this.repo.changeBugStatus(created.bugKey, 'SUBMITTED'); finalStatus = 'SUBMITTED'; final = this.repo.changeBugStatus(created.bugKey, 'TRIAGING'); finalStatus = 'TRIAGING'; final = this.repo.changeBugStatus(created.bugKey, 'QUEUED'); finalStatus = 'QUEUED'; } catch { /* repositories may expose a reduced state machine */ }
     let job: unknown = null; if (finalStatus === 'QUEUED' && this.queue) job = this.queue.enqueueJob(final.id, final.bugKey);
-    updateConversation(this.repo, conversation.id, draft, completeness, 'submitted'); send(response, 201, { bug: final, bugKey: final.bugKey, status: finalStatus, job, completeness, ...this.documentResponse(conversation.id, document) });
+    updateConversation(this.repo, conversation.id, draft, finalCompleteness, 'submitted'); send(response, 201, { bug: final, bugKey: final.bugKey, status: finalStatus, job, completeness: finalCompleteness, ...this.documentResponse(conversation.id, document) });
   }
   private async handleBug(id: string, action: string | undefined, method: string, response: http.ServerResponse): Promise<void> {
     const bug = this.repo.getBug(id); if (!bug) { send(response, 404, { error: 'Bug report not found' }); return; }

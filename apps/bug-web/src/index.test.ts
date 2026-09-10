@@ -257,6 +257,38 @@ describe('conversational intake page', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it('gates incomplete intake and keeps the editor usable after an API 422', async () => {
+    const incomplete = {
+      score: 55,
+      readyForConfirmation: false,
+      missingCriticalInformation: ['expectedBehavior', 'environmentProfile.repositoryUrl'],
+    };
+    const created = { id: 'conversation-1', messages: [], completeness: incomplete, document: { content: '# Bug', revision: 1, syncStatus: 'synced' } };
+    const { elements, fetchMock } = executeIntakeClient([created]);
+    await vi.waitFor(() => expect(elements.get('state')?.textContent).toBe('可继续补充'));
+    expect(elements.get('submit')?.disabled).toBe(true);
+    expect(elements.get('missing')?.textContent).toContain('expectedBehavior');
+    expect(elements.get('missing')?.textContent).toContain('environmentProfile.repositoryUrl');
+    elements.get('submit')?.onclick?.();
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(elements.get('error')?.textContent).toContain('请先补齐');
+    expect(elements.get('success-card')?.hidden).toBe(true);
+
+    const ready = { id: 'conversation-1', messages: [], completeness: { score: 70, readyForConfirmation: true, missingCriticalInformation: [] }, document: { content: '# Bug', revision: 1, syncStatus: 'synced' } };
+    const failed = { ok: false, status: 422, headers: { get: () => 'application/json' }, json: async () => ({ error: '补充所有必填信息后才能提交 Bug', code: 'INTAKE_INCOMPLETE', completeness: incomplete, draft: {} }) };
+    const retry = executeIntakeClient([ready, failed]);
+    await vi.waitFor(() => expect(retry.elements.get('state')?.textContent).toBe('可继续补充'));
+    expect(retry.elements.get('submit')?.disabled).toBe(false);
+    retry.elements.get('submit')?.onclick?.();
+    await vi.waitFor(() => expect(retry.elements.get('error')?.hidden).toBe(false));
+    expect(retry.fetchMock).toHaveBeenCalledTimes(2);
+    expect(retry.elements.get('success-card')?.hidden).toBe(true);
+    expect(retry.elements.get('markdown-editor')?.readOnly).toBe(false);
+    expect(retry.elements.get('submit')?.disabled).toBe(true);
+    expect(retry.elements.get('missing')?.textContent).toContain('environmentProfile.repositoryUrl');
+  });
+
   it('streams the chat reply with live progress and renders the final result', async () => {
     const created = { id: 'conversation-1', messages: [{ role: 'assistant', content: '请直接描述你遇到的问题。' }], completeness: { score: 0 }, document: { content: '# Bug', revision: 1, syncStatus: 'synced' } };
     const finalConversation = {

@@ -8,6 +8,7 @@ const intakeClientScript = String.raw `(() => {
   let saveTimer = null;
   let saving = null;
   let pageState = 'loading';
+  let submissionReady = false;
 
   const $ = (id) => document.getElementById(id);
   const showError = (message) => {
@@ -27,6 +28,25 @@ const intakeClientScript = String.raw `(() => {
       $(key).disabled = disabled;
     });
   };
+  const isSubmissionReady = (completeness) => {
+    const value = completeness || {};
+    const score = Number(value.score ?? 0);
+    const missing = Array.isArray(value.missingCriticalInformation) ? value.missingCriticalInformation : [];
+    // Keep the client gate aligned with the authoritative policy. A high score
+    // never overrides a reported critical omission.
+    if (value.readyForConfirmation !== undefined)
+      return value.readyForConfirmation === true && score >= 65 && missing.length === 0;
+    return score >= 65 && missing.length === 0;
+  };
+  const updateSubmitGate = (completeness) => {
+    if (completeness)
+      submissionReady = isSubmissionReady(completeness);
+    const submitButton = $('submit');
+    if (!submitButton)
+      return;
+    submitButton.disabled = pageState !== 'ready' || !submissionReady;
+    submitButton.title = submissionReady ? '信息已完整，可以提交。' : '请先补齐关键缺失信息。';
+  };
   const setPageState = (next, action) => {
     pageState = next;
     const labels = {
@@ -43,6 +63,7 @@ const intakeClientScript = String.raw `(() => {
     $('markdown-editor').readOnly = next === 'submitted';
     $('send').textContent = next === 'busy' && action !== 'submit' ? '处理中…' : '发送';
     $('submit').textContent = next === 'busy' && action === 'submit' ? '正在提交…' : next === 'submitted' ? '已提交' : '确认提交';
+    updateSubmitGate();
   };
   const handleDocumentConflict = (error) => {
     conflictDocument = error && error.data && error.data.document || null;
@@ -66,10 +87,14 @@ const intakeClientScript = String.raw `(() => {
     const messages = value.messages || [];
     $('messages').innerHTML = messages.map((message) => '<div class="message ' + esc(message.role) + '">' + esc(message.content) + '</div>').join('') || '<p class="muted">还没有消息。</p>';
     const completeness = value.completeness || {};
+    submissionReady = isSubmissionReady(completeness);
     $('score').textContent = String(completeness.score ?? 0);
-    $('missing').textContent = completeness.missingCriticalInformation && completeness.missingCriticalInformation.length
-      ? 'Missing: ' + completeness.missingCriticalInformation.join(', ')
-      : 'Information looks complete.';
+    const missing = Array.isArray(completeness.missingCriticalInformation) ? completeness.missingCriticalInformation : [];
+    $('missing').textContent = missing.length
+      ? '提交前还需要补充：' + missing.join('、')
+      : submissionReady ? '信息已完整，可以提交。' : '当前完整度不足 65 分，请继续补充信息。';
+    $('missing').className = submissionReady ? 'ready-hint' : 'missing-hint';
+    updateSubmitGate();
     $('messages').scrollTop = $('messages').scrollHeight;
     const documentValue = value.document;
     if (documentValue) {
@@ -79,6 +104,24 @@ const intakeClientScript = String.raw `(() => {
         setDocumentState('saved', documentValue.syncStatus || 'synced');
       }
     }
+  }
+  function renderSubmissionFailure(error) {
+    const data = error && error.data || {};
+    if (data.completeness) {
+      conversation = conversation ? { ...conversation, ...(data.draft ? { draft: data.draft } : {}), completeness: data.completeness } : conversation;
+      if (data.document)
+        documentState = data.document;
+      const completeness = data.completeness;
+      submissionReady = isSubmissionReady(completeness);
+      $('score').textContent = String(completeness.score ?? 0);
+      const missing = Array.isArray(completeness.missingCriticalInformation) ? completeness.missingCriticalInformation : [];
+      $('missing').textContent = missing.length
+        ? '提交前还需要补充：' + missing.join('、')
+        : '当前完整度不足 65 分，请继续补充信息。';
+      $('missing').className = 'missing-hint';
+    }
+    showError((data.code === 'INTAKE_INCOMPLETE' ? '信息不足，暂不能提交：' : '') + (error.message || 'Request failed'));
+    updateSubmitGate();
   }
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -319,6 +362,10 @@ const intakeClientScript = String.raw `(() => {
   }
   async function submit() {
     if (pageState !== 'ready' || !id) return;
+    if (!submissionReady) {
+      renderSubmissionFailure({ message: '请先补齐页面列出的关键缺失信息。', data: { code: 'INTAKE_INCOMPLETE', completeness: conversation && conversation.completeness } });
+      return;
+    }
     if (!confirm('确认提交会创建正式 Bug。请确认 Markdown 报告内容无误后继续。')) return;
     setPageState('busy', 'submit');
     try {
@@ -331,6 +378,7 @@ const intakeClientScript = String.raw `(() => {
       renderSubmitted(result);
     } catch (error) {
       if (error.status === 409 && error.data && error.data.document) handleDocumentConflict(error);
+      else if (error.status === 422 && error.data && error.data.code === 'INTAKE_INCOMPLETE') renderSubmissionFailure(error);
       else showError(error.message);
     } finally {
       if (pageState !== 'submitted') setPageState('ready');

@@ -85,7 +85,7 @@
 
 ### 执行步骤
 
-1. 创建会话并多轮对话，补齐信息直到 `readyForConfirmation: true`（完整度需 ≥ 65，否则提交后停在 `NEEDS_INFO`，不进队列）。信息要点：问题描述、复现步骤、实际/期望行为、环境（浏览器/系统）、影响范围、仓库 URL、默认分支。
+1. 创建会话并多轮对话，补齐信息直到 `readyForConfirmation: true`（完整度需 ≥ 65 且没有关键缺失）。信息要点：问题描述、复现步骤、实际/期望行为、环境（浏览器/系统）、影响范围、仓库 URL、默认分支。未达标时确认提交应被页面禁用；直接调用 API 应返回 422、`code=INTAKE_INCOMPLETE`，不会创建 Bug/Job，会话仍为 active。
 2. 提交：`POST /api/bugs/conversations/:id/submit`，body `{"confirm":true}`。响应含 `bugKey`（如 `BUG-000003`）。
 3. 轮询 `GET /api/bugs` 观察 bug 状态流转：`QUEUED → PREPARING_ENV → FIXING → VALIDATING → REVIEWING → FIX_READY`（DRY_RUN）或 `→ PUSHING → READY_FOR_HUMAN_REVIEW`（真实 push）。fixer 最长 45 分钟，每 60s 轮询一次即可。
 4. 验证产物 `data/agent-results/<BUG-KEY>/`：`bug.json`、`fix-task.json`、`environment-run.json`、`agent-result.json`、`validation.json`、`diff.patch`、`review.json`、`git-result.json`、`pipeline.json`（0600 权限）。
@@ -114,7 +114,7 @@
 ## 2026-09-08 已执行记录（repair worker，DRY_RUN）
 
 - 3 轮对话（store tab 切换无反应）→ 提交 → `BUG-000002` 入队；
-- 完整度不足时正确停在 `NEEDS_INFO`（BUG-000001，score 61）；补齐后（score 70）提交进队列；
+- （历史行为）完整度不足时曾创建 `NEEDS_INFO`（BUG-000001，score 61）；当前门禁应改为提交前返回 `INTAKE_INCOMPLETE`，补齐后才创建 Bug 并入队；
 - 修复链路走通：FIXING → VALIDATING → REVIEWING → `FIX_READY`，reviewer approve（regressionRisk: low）；
 - fixer/reviewer 首次输出夹带散文，回喂校验错误后第二次通过（纠错回路生效）；
 - 九件套产物齐全；`DRY_RUN` 下无 commit/push，远端仓库无改动。

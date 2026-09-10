@@ -151,9 +151,9 @@ Pi 的内置 `bash` 本身不是系统级 sandbox；Prompt 中的“禁止网络
 1. `POST /api/bugs/conversations` 创建会话。服务会返回会话 ID，并发送首条提示。
 2. 将复现过程、实际结果、期望结果和环境发到 `POST /api/bugs/conversations/:id/messages`，请求体为 `{ "content": "..." }`。Intake 会在缺少项时继续追问；如果项目没有现成 Profile，它会询问项目的 HTTPS/SSH Git clone URL、前端/后端目标以及已知的默认分支。每轮最多补问 3 个问题；可以明确回答 `unknown`/“不确定”，系统不会无限重复追问。
 3. 通过 `GET /api/bugs/conversations/:id/draft` 查看草稿，或用 `PATCH /api/bugs/conversations/:id/draft` 编辑。可传 `{ "draft": { ... }, "userEditedFields": ["title", "reproduction.steps"] }`；人工编辑字段会覆盖后续 Intake 模型更新。
-4. 页面显示完整性评分和缺失项。评分达到 65 才会进入可确认状态；缺少关键事实时会进入 `NEEDS_INFO`，不会排入修复队列。
+4. 页面显示完整性评分和缺失项。只有权威完整度判定 `readyForConfirmation: true`、评分至少 65 且没有关键缺失时，确认提交按钮才可用；缺少信息时仍停留在当前会话，可继续对话或编辑 Markdown。
 5. 展示草稿预览后，使用 `POST /api/bugs/conversations/:id/submit`，请求必须含 `{ "confirm": true }` 或 `{ "confirmed": true }`。没有显式确认会返回 400。
-6. 成功提交会生成类似 `BUG-000001` 的 Key。信息充分时状态依次经过收集/确认/提交/分诊并变为 `QUEUED`，且若队列已注入则创建 Job；不足时变为 `NEEDS_INFO`。重复提交同一会话是幂等的。
+6. 成功提交会生成类似 `BUG-000001` 的 Key，状态依次经过收集/确认/提交/分诊并变为 `QUEUED`，且若队列已注入则创建唯一 Job。若服务端发现 Intake 未达标，返回 HTTP 422、稳定错误码 `INTAKE_INCOMPLETE`，并返回最新 `completeness`/`draft`；不会创建 Bug 或 Job，会话保持 active，可补充后再次提交。重复提交成功会话是幂等的。
 
 ### 项目仓库与动态 Profile
 
@@ -197,7 +197,6 @@ Content-Type: application/json
 
 ```text
 DRAFT → COLLECTING → READY_FOR_CONFIRMATION → SUBMITTED → TRIAGING
-                                                         ├→ NEEDS_INFO
                                                          └→ QUEUED
 ```
 
@@ -271,7 +270,8 @@ git-result.json   pipeline.json       diff.patch
 | --- | --- |
 | 依赖安装失败 | 确认 Node/pnpm 版本和本地 pnpm store；保持 `--offline` 时补齐缓存 |
 | API 无法就绪 | 查看 `/api/health/ready`，确认 `DATABASE_PATH` 父目录可写、SQLite 文件未被占用 |
-| 没有 Bug 进入队列 | 查看提交返回的 `completeness` 和状态；低于 65 会进入 `NEEDS_INFO`，且未注入 queue 时不会建 Job |
+| 提交被拒绝 | 查看 HTTP 422 的 `code=INTAKE_INCOMPLETE`、`completeness.missingCriticalInformation` 和 `draft`；补充会话或编辑 Markdown 后重试 |
+| 没有 Bug 进入队列 | 只有 `readyForConfirmation=true`、无关键缺失且 score ≥ 65 才会创建 Bug 并进入 `QUEUED`；未注入 queue 时不会建 Job |
 | `No environment profile`/`Ambiguous` | 先调用 `/api/environments` 查看静态/动态 Profile；动态项目应在确认提交后检查 `DATA_ROOT/generated-environments.yaml` 是否已生成，并确认 target 或 `environmentProfileId` 唯一 |
 | `REPOSITORY_CLONE_FAILED` | 检查 Intake 中提供的 HTTPS/SSH clone URL、远程仓库可达性和凭据；修正会话后再次显式确认提交 |
 | Profile 文件被阻止 | 使用相对路径，确认文件存在、未符号链接到 root 外，且不超过 256 KiB |

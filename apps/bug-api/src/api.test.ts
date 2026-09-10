@@ -35,24 +35,32 @@ describe('Bug API routes', () => {
     expect(patched.status).toBe(200);
     expect(patched.data.draft.executionTarget).toBe('frontend');
 
-    const rejected = await server.inject({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: {} });
-    expect(rejected.status).toBe(400);
+    const rejected = await server.inject<{ code: string; completeness: { score: number; readyForConfirmation: boolean }; draft: Record<string, unknown> }>({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirm: true } });
+    expect(rejected.status, rejected.raw).toBe(422);
+    expect(rejected.data.code).toBe('INTAKE_INCOMPLETE');
+    expect(rejected.data.completeness.readyForConfirmation).toBe(false);
+    expect(rejected.data.completeness.score).toBeLessThan(65);
+    expect(rejected.data.draft).toMatchObject({ actualBehavior: '登录按钮一直 loading' });
+    expect(repository.getConversation(id)?.status).toBe('active');
+    expect(repository.listBugs()).toHaveLength(0);
 
-    const submitted = await server.inject<{ bugKey: string }>({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirmed: true } });
-    expect(submitted.status).toBe(201);
+    await server.inject({ method: 'PATCH', url: `/api/bugs/conversations/${id}/draft`, body: { draft: { component: 'login', environmentProfile: { name: 'storefront', repositoryUrl: 'https://git.example.test/team/storefront.git' } } } });
+    const submitted = await server.inject<{ bugKey: string; status: string }>({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirmed: true } });
+    expect(submitted.status, submitted.raw).toBe(201);
     expect(submitted.data.bugKey).toMatch(/^BUG-\d{6}$/);
+    expect(submitted.data.status).toBe('QUEUED');
 
     const list = await server.inject<{ bugs: unknown[] }>({ url: '/api/bugs' });
     expect(list.status).toBe(200);
     expect(list.data.bugs).toHaveLength(1);
-    expect((list.data.bugs[0] as { status: string; key: string; completeness: number }).status).toBe('NEEDS_INFO');
+    expect((list.data.bugs[0] as { status: string; key: string; completeness: number }).status).toBe('QUEUED');
     expect((list.data.bugs[0] as { key: string }).key).toMatch(/^BUG-/);
-    const filtered = await server.inject<{ bugs: unknown[] }>({ url: '/api/bugs?target=frontend&status=NEEDS_INFO' });
+    const filtered = await server.inject<{ bugs: unknown[] }>({ url: '/api/bugs?target=frontend&status=QUEUED' });
     expect(filtered.data.bugs).toHaveLength(1);
     const detail = await server.inject<{ bug: { status: string }; progress: { status: string }; messages: unknown[]; document: { content: string } }>({ url: `/api/bugs/${submitted.data.bugKey}` });
     expect(detail.status).toBe(200);
-    expect(detail.data.bug.status).toBe('NEEDS_INFO');
-    expect(detail.data.progress.status).toBe('NEEDS_INFO');
+    expect(detail.data.bug.status).toBe('QUEUED');
+    expect(detail.data.progress.status).toBe('QUEUED');
     expect(detail.data.messages.length).toBeGreaterThan(0);
     expect(detail.data.document.content).toMatch(/^# /u);
     expect((await server.inject({ url: '/api/health/live' })).status).toBe(200);
@@ -66,10 +74,12 @@ describe('Bug API routes', () => {
 
   it('does not claim cancellation for a state outside the cancellation transitions', async () => {
     const created = await server.inject<{ id: string }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
-    await server.inject({ method: 'PATCH', url: `/api/bugs/conversations/${created.data.id}/draft`, body: { draft: { title: 'validation cancellation', actualBehavior: 'broken', expectedBehavior: 'works', executionTarget: 'frontend' } } });
+    await server.inject({ method: 'PATCH', url: `/api/bugs/conversations/${created.data.id}/draft`, body: { draft: { title: 'validation cancellation', actualBehavior: 'broken', expectedBehavior: 'works', executionTarget: 'frontend', component: 'login', environmentProfile: { name: 'storefront', repositoryUrl: 'https://git.example.test/team/storefront.git' } } } });
     const submitted = await server.inject<{ bugKey: string }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/submit`, body: { confirm: true } });
     const repository = (server as unknown as { repo: SQLiteBugRepository }).repo;
-    for (const status of ['TRIAGING', 'QUEUED', 'PREPARING_ENV', 'FIXING', 'VALIDATING'] as const) repository.changeBugStatus(submitted.data.bugKey, status);
+    // Submit already leaves a valid Bug in QUEUED; advance only through the
+    // legal worker states before asserting that VALIDATING is not cancellable.
+    for (const status of ['PREPARING_ENV', 'FIXING', 'VALIDATING'] as const) repository.changeBugStatus(submitted.data.bugKey, status);
     const cancelled = await server.inject<{ status: string; cancellable: boolean }>({ method: 'POST', url: `/api/bugs/${submitted.data.bugKey}/cancel` });
     expect(cancelled.status).toBe(409); expect(cancelled.data.cancellable).toBe(false);
     expect((await server.inject<{ status: string }>({ url: `/api/bugs/${submitted.data.bugKey}/progress` })).data.status).toBe('VALIDATING');
@@ -86,7 +96,7 @@ describe('Bug API routes', () => {
       },
     });
     const created = await protectedServer.inject<{ id: string }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
-    await protectedServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${created.data.id}/draft`, body: { draft: { title: 'bad mapping', actualBehavior: 'broken', executionTarget: 'frontend', environmentProfileId: '/tmp/reporter-path' } } });
+    await protectedServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${created.data.id}/draft`, body: { draft: { title: 'bad mapping', actualBehavior: 'broken', expectedBehavior: 'works', executionTarget: 'frontend', environmentProfileId: '/tmp/reporter-path' } } });
     const submitted = await protectedServer.inject<{ code: string }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/submit`, body: { confirm: true } });
     expect(submitted.status).toBe(422);
     expect(submitted.data.code).toBe('ENVIRONMENT_PROFILE_INVALID');
@@ -111,6 +121,37 @@ describe('Bug API routes', () => {
     expect(provisioned).toEqual([expect.objectContaining({ repositoryUrl: 'https://git.example.test/team/storefront.git', target: 'frontend' })]);
   });
 
+  it('keeps an incomplete intake active, then creates one queued Bug and one Job after supplementation', async () => {
+    const queue = new JobQueue(repository, fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-api-queue-')));
+    const queuedServer = new BugApiServer({}, { repo: repository, intake: new IntakeService(new FakeIntakeModel()), queue });
+    const created = await queuedServer.inject<{ id: string }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
+    const id = created.data.id;
+    await queuedServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${id}/draft`, body: { draft: { actualBehavior: '按钮卡住', expectedBehavior: '正常跳转', component: 'login' } } });
+    const rejected = await queuedServer.inject<{ code: string; completeness: { score: number }; conversation: { status: string } }>({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirm: true } });
+    expect(rejected.status, rejected.raw).toBe(422);
+    expect(rejected.data.code).toBe('INTAKE_INCOMPLETE');
+    expect(rejected.data.completeness.score).toBeLessThan(65);
+    expect(rejected.data.conversation.status).toBe('active');
+    expect(repository.listBugs()).toHaveLength(0);
+    expect(queue.listJobs()).toHaveLength(0);
+
+    const supplemented = await queuedServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${id}/draft`, body: { draft: { environmentProfile: { name: 'storefront', repositoryUrl: 'https://git.example.test/team/storefront.git' } } } });
+    expect(supplemented.status, supplemented.raw).toBe(200);
+    const submitted = await queuedServer.inject<{ bugKey: string; status: string; job: { id: string } }>({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirm: true } });
+    expect(submitted.status, submitted.raw).toBe(201);
+    expect(submitted.data.status).toBe('QUEUED');
+    expect(submitted.data.job?.id).toBeTruthy();
+    expect(repository.listBugs()).toHaveLength(1);
+    expect(queue.listJobs()).toHaveLength(1);
+
+    const repeated = await queuedServer.inject<{ bugKey: string; idempotent: boolean }>({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirm: true } });
+    expect(repeated.status, repeated.raw).toBe(200);
+    expect(repeated.data.idempotent).toBe(true);
+    expect(repeated.data.bugKey).toBe(submitted.data.bugKey);
+    expect(repository.listBugs()).toHaveLength(1);
+    expect(queue.listJobs()).toHaveLength(1);
+  });
+
   it('keeps Chat and editable Markdown synchronized through revisioned reconciliation', async () => {
     const created = await server.inject<{ id: string; document: { content: string; revision: number; sha256: string } }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
     const id = created.data.id; expect(created.data.document.content).toContain('## Actual Behavior');
@@ -123,6 +164,7 @@ describe('Bug API routes', () => {
     expect(staleMessage.status).toBe(409); expect(staleMessage.data.code).toBe('DOCUMENT_REVISION_CONFLICT'); expect(staleMessage.data.document.revision).toBe(saved.data.revision);
     const reconciled = await server.inject<{ document: { content: string; syncStatus: string }; draft: { actualBehavior?: string } }>({ method: 'POST', url: `/api/bugs/conversations/${id}/messages`, body: { content: '补充：这个问题每次都能复现。' } });
     expect(reconciled.status, reconciled.raw).toBe(200); expect(reconciled.data.draft.actualBehavior).toContain('页面显示白屏'); expect(reconciled.data.document.syncStatus).toBe('synced');
+    await server.inject({ method: 'PATCH', url: `/api/bugs/conversations/${id}/draft`, body: { draft: { component: 'login', environmentProfile: { name: 'storefront', repositoryUrl: 'https://git.example.test/team/storefront.git' } } } });
     const submitted = await server.inject<{ document: { syncStatus: string }; bugKey: string }>({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirm: true } });
     expect(submitted.status, submitted.raw).toBe(201); expect(submitted.data.bugKey).toMatch(/^BUG-/); expect(submitted.data.document.syncStatus).toBe('synced');
   });
