@@ -13,7 +13,7 @@ import { RepoManager } from '@llmbugfix/repo-manager';
 import { createLogger, parseConfig } from '@llmbugfix/shared';
 import { CommandRunner, Validator } from '@llmbugfix/validator';
 import { Orchestrator } from '@llmbugfix/orchestrator';
-import { renderDashboardHtml, renderDetailHtml, renderIndexHtml } from '../../bug-web/src/index.js';
+import { resolveWebRoute } from '../../bug-web/src/index.js';
 import { BugApiServer } from './index.js';
 
 function loadDotEnv(filename = '.env'): void {
@@ -141,12 +141,7 @@ if (llmEnabled) {
     orchestrator = new Orchestrator(config, repo, queue, environmentResolver, repoManager, environmentRunner, agentRunner, new Validator(commandRunner), { dryRun: process.env.DRY_RUN !== 'false' });
   }
 }
-const pageRenderer = (pathname: string): string | undefined => {
-  if (pathname === '/') return renderIndexHtml();
-  if (pathname === '/dashboard') return renderDashboardHtml();
-  const detail = pathname.match(/^\/bugs\/([^/]+)$/u);
-  return detail ? renderDetailHtml(decodeURIComponent(detail[1])) : undefined;
-};
+const pageRenderer = (pathname: string) => resolveWebRoute(pathname);
 const api = new BugApiServer({ ...process.env, ...config, DRY_RUN: process.env.DRY_RUN ?? true }, { repo, intake, queue, attachments, environments: environments ?? environmentResolver, pageRenderer });
 const host = process.env.BUGFIX_LISTEN_HOST ?? '127.0.0.1';
 const port = await api.listen(portFromEnv(process.env.PORT), host);

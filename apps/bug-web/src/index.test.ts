@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { renderDashboardHtml, renderDetailHtml, renderIndexHtml } from './index.js';
+import { clientScripts, getStaticAsset, renderDashboardHtml, renderDetailHtml, renderIndexHtml, resolveWebRoute } from './index.js';
 
 type FakeElement = {
   textContent: string;
@@ -28,6 +28,8 @@ const clientElementIds = [
   'submitted-score', 'submitted-explanation', 'typing-status', 'typing-content', 'pending-user', 'pending-typing',
 ];
 
+const detailElementIds = ['app', 'view-toggle', 'heading', 'loading', 'markdown-view', 'structured-view'];
+
 function executeIntakeClient(responses: Array<unknown | Error>) {
   const elements = new Map<string, FakeElement>();
   for (const id of clientElementIds) {
@@ -49,7 +51,7 @@ function executeIntakeClient(responses: Array<unknown | Error>) {
     return { ok: true, status: 200, json: async () => value, args };
   });
   const confirmMock = vi.fn(() => true);
-  const script = renderIndexHtml().match(/<script>([\s\S]*)<\/script>/)?.[1];
+  const script = clientScripts.intake;
   if (!script) throw new Error('Intake client script is missing');
   new Function('document', 'fetch', 'confirm', script)(
     { getElementById: (id: string) => elements.get(id) },
@@ -59,10 +61,7 @@ function executeIntakeClient(responses: Array<unknown | Error>) {
   return { elements, fetchMock, confirmMock };
 }
 
-describe('bug detail page', () => {
-  const detailElementIds = ['app', 'view-toggle', 'heading', 'loading', 'markdown-view', 'structured-view'];
-
-  function executeDetailClient(detail: unknown) {
+function executeDetailClient(detail: unknown, pathname = '/bugs/BUG-000123') {
     const elements = new Map<string, FakeElement>();
     for (const id of detailElementIds) {
       const element: FakeElement = {
@@ -74,24 +73,37 @@ describe('bug detail page', () => {
       elements.set(id, element);
     }
     const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => detail }));
-    const script = renderDetailHtml('BUG-000123').match(/<script>([\s\S]*)<\/script>/)?.[1];
+    const script = clientScripts.detail;
     if (!script) throw new Error('Detail client script is missing');
-    new Function('document', 'fetch', script)(
+    const fakeLocation = { pathname };
+    new Function('document', 'fetch', 'location', 'window', script)(
       { getElementById: (id: string) => elements.get(id) },
       fetchMock,
+      fakeLocation,
+      { location: fakeLocation },
     );
     return { elements, fetchMock };
-  }
+}
+
+describe('bug detail page', () => {
 
   it('embeds a view toggle and both detail views in the page shell', () => {
     const html = renderDetailHtml('BUG-000001');
     expect(html).toContain('id="view-toggle"');
     expect(html).toContain('id="markdown-view"');
     expect(html).toContain('id="structured-view"');
-    expect(html).toContain("let mode = 'markdown'");
-    expect(html).toContain('renderMarkdown');
-    expect(html).toContain('detail.document && detail.document.content');
-    expect(html).toContain('开发视图（结构化数据）');
+    expect(html).toContain('<link rel="stylesheet" href="/static/detail.css">');
+    expect(html).toContain('<script src="/static/detail.js"></script>');
+    const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const [, attrs, body] of scripts) {
+      expect(attrs).toContain('src=');
+      expect(body.trim()).toBe('');
+    }
+    expect(clientScripts.detail).toContain("let mode = 'markdown'");
+    expect(clientScripts.detail).toContain('renderMarkdown');
+    expect(clientScripts.detail).toContain('detail.document && detail.document.content');
+    expect(clientScripts.detail).toContain('开发视图（结构化数据）');
   });
 
   it('shows the Markdown report for testers and toggles to structured data for developers', async () => {
@@ -139,26 +151,65 @@ describe('bug detail page', () => {
 });
 
 describe('conversational intake page', () => {
-  it('emits a parseable inline client script', () => {
-    const script = renderIndexHtml().match(/<script>([\s\S]*)<\/script>/)?.[1];
-    expect(script).toBeDefined();
-    expect(() => new Function(script!)).not.toThrow();
-  });
-
-  it('keeps every rendered inline script parseable', () => {
-    for (const html of [renderIndexHtml(), renderDashboardHtml(), renderDetailHtml('BUG-000001')]) {
-      const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
-      expect(scripts.length).toBeGreaterThan(0);
-      for (const [, script] of scripts) expect(() => new Function(script)).not.toThrow();
+  it('provides parseable client scripts without String.raw or inline embedding', () => {
+    for (const [, script] of Object.entries(clientScripts)) {
+      expect(script).toBeDefined();
+      expect(() => new Function(script)).not.toThrow();
     }
   });
 
-  it('embeds detail ids as safe JSON strings without HTML entity corruption', () => {
-    const html = renderDetailHtml('a&b</script>');
-    expect(html).toContain('"a\\u0026b\\u003c/script\\u003e"');
-    expect(html).not.toContain('a&amp;b');
-    expect([...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]).toHaveLength(1);
-    expect(() => new Function(html.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? '')).not.toThrow();
+  it('serves HTML pages with external script links and no business inline scripts', () => {
+    for (const html of [renderIndexHtml(), renderDashboardHtml(), renderDetailHtml('BUG-000001')]) {
+      const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+      expect(scripts.length).toBeGreaterThan(0);
+      for (const [, attrs, body] of scripts) {
+        expect(attrs).toContain('src=');
+        expect(body.trim()).toBe('');
+      }
+      expect(html).toMatch(/<link rel="stylesheet" href="\/static\/[^"]+\.css">/);
+    }
+  });
+
+  it('safely parses bug id from location.pathname including encoded and malicious values', async () => {
+    const detail = { bug: { bugKey: 'BUG-000123' }, key: 'BUG-000123', status: 'OPEN' };
+    const standard = executeDetailClient(detail, '/bugs/BUG-000123');
+    await vi.waitFor(() => expect(standard.elements.get('heading')?.textContent).toBe('BUG-000123'));
+    expect(standard.fetchMock).toHaveBeenCalledWith('/api/bugs/BUG-000123');
+
+    const encoded = executeDetailClient(detail, '/bugs/a%26b%3C%2Fscript%3E');
+    await vi.waitFor(() => expect(encoded.fetchMock).toHaveBeenCalledWith('/api/bugs/a%26b%3C%2Fscript%3E'));
+
+    const malformed = executeDetailClient(detail, '/bugs/%E0%A4%A');
+    await vi.waitFor(() => expect(malformed.elements.get('app')?.innerHTML).toContain('A bug id is required'));
+
+    const nonMatching = executeDetailClient(detail, '/dashboard');
+    await vi.waitFor(() => expect(nonMatching.elements.get('app')?.innerHTML).toContain('A bug id is required'));
+  });
+
+  it('maps static assets with correct MIME types and cache headers', () => {
+    const jsAsset = getStaticAsset('/static/intake.js');
+    expect(jsAsset).toBeDefined();
+    expect(jsAsset?.contentType).toBe('application/javascript; charset=utf-8');
+    expect(jsAsset?.headers?.['cache-control']).toBe('no-cache');
+
+    const cssAsset = getStaticAsset('/static/intake.css');
+    expect(cssAsset).toBeDefined();
+    expect(cssAsset?.contentType).toBe('text/css; charset=utf-8');
+    expect(cssAsset?.headers?.['cache-control']).toBe('no-cache');
+
+    expect(getStaticAsset('/static/nonexistent.js')).toBeUndefined();
+
+    const rootRoute = resolveWebRoute('/');
+    expect(rootRoute?.contentType).toBe('text/html; charset=utf-8');
+    expect(rootRoute?.body).toContain('Bug Intake');
+
+    const dashRoute = resolveWebRoute('/dashboard');
+    expect(dashRoute?.contentType).toBe('text/html; charset=utf-8');
+    expect(dashRoute?.body).toContain('Bug Dashboard');
+
+    const detailRoute = resolveWebRoute('/bugs/BUG-123');
+    expect(detailRoute?.contentType).toBe('text/html; charset=utf-8');
+    expect(detailRoute?.body).toContain('Bug detail');
   });
 
   it('uses an editable Markdown document instead of a structured draft form', () => {
@@ -166,15 +217,15 @@ describe('conversational intake page', () => {
     expect(html).toContain('id="markdown-editor"');
     expect(html).toContain('document-save-state');
     expect(html).toContain('document-sync-state');
-    expect(html).toContain('flushDocument');
-    expect(html).toContain('handleDocumentConflict');
     expect(html).toContain('reload-server-document');
-    expect(html).toContain('setEditorDirty');
-    expect(html).toContain('saveTimer = setTimeout');
-    expect(html).toContain('await flushDocument()');
-    expect(html).toContain('error.data && error.data.document');
-    expect(html).toContain('本地编辑已保留');
-    expect(html).toContain("localDirty = $('markdown-editor').value !== content");
+    expect(clientScripts.intake).toContain('flushDocument');
+    expect(clientScripts.intake).toContain('handleDocumentConflict');
+    expect(clientScripts.intake).toContain('setEditorDirty');
+    expect(clientScripts.intake).toContain('saveTimer = setTimeout');
+    expect(clientScripts.intake).toContain('await flushDocument()');
+    expect(clientScripts.intake).toContain('error.data && error.data.document');
+    expect(clientScripts.intake).toContain('本地编辑已保留');
+    expect(clientScripts.intake).toContain("localDirty = $('markdown-editor').value !== content");
     expect(html).not.toContain('id="title"');
     expect(html).not.toContain('id="target"');
     expect(html).not.toContain('id="profile"');
@@ -190,31 +241,31 @@ describe('conversational intake page', () => {
     expect(html).toContain('>Dashboard</a>');
     expect(html).toContain('id="success-card"');
     expect(html).toContain('role="status"');
-    expect(html).toContain('hidden><h2>Bug 已提交</h2>');
+    expect(html).toContain('<h2>Bug 已提交</h2>');
     expect(html).toContain('id="bug-key-link"');
     expect(html).toContain('id="bug-detail-link"');
-    expect(html).toContain("$('state').textContent = '已提交 ' + (bugKey || 'Bug')");
+    expect(clientScripts.intake).toContain("$('state').textContent = '已提交 ' + (bugKey || 'Bug')");
     expect(html).toContain('查看 Bug 详情');
     expect(html).toContain('前往 Dashboard');
     expect(html).toContain('创建新报告');
-    expect(html).toContain("'/bugs/' + encodeURIComponent(bugKey)");
+    expect(clientScripts.intake).toContain("'/bugs/' + encodeURIComponent(bugKey)");
   });
 
   it('contains retry, pending, failure recovery, and post-submit write guards', () => {
     const html = renderIndexHtml();
     expect(html).toContain('id="retry-init"');
     expect(html).toContain('重试加载');
-    expect(html).toContain("loading: '正在创建会话…'");
-    expect(html).toContain("busy: action === 'submit' ? '正在提交…' : '处理中…'");
-    expect(html).toContain("if (pageState !== 'ready' || !id) return;");
-    expect(html).toContain("if (pageState === 'submitted') return saving || Promise.resolve();");
-    expect(html).toContain("if (pageState === 'submitted' || pageState === 'busy'");
-    expect(html).toContain("if (pageState !== 'submitted') setPageState('ready');");
-    expect(html).toContain('clearTimeout(saveTimer);\n    saveTimer = null;\n    localDirty = false;');
-    expect(html).toContain('若当前服务已配置 repair worker');
-    expect(html).toContain('查看实时状态和修复结果');
-    expect(html).toContain('报告已创建，但信息仍不充分');
-    expect(html).toContain('body: JSON.stringify({ confirm: true })');
+    expect(clientScripts.intake).toContain("loading: '正在创建会话…'");
+    expect(clientScripts.intake).toContain("busy: action === 'submit' ? '正在提交…' : '处理中…'");
+    expect(clientScripts.intake).toContain("if (pageState !== 'ready' || !id) return;");
+    expect(clientScripts.intake).toContain("if (pageState === 'submitted') return saving || Promise.resolve();");
+    expect(clientScripts.intake).toContain("if (pageState === 'submitted' || pageState === 'busy'");
+    expect(clientScripts.intake).toContain("if (pageState !== 'submitted') setPageState('ready');");
+    expect(clientScripts.intake).toContain('clearTimeout(saveTimer);\n    saveTimer = null;\n    localDirty = false;');
+    expect(clientScripts.intake).toContain('若当前服务已配置 repair worker');
+    expect(clientScripts.intake).toContain('查看实时状态和修复结果');
+    expect(clientScripts.intake).toContain('报告已创建，但信息仍不充分');
+    expect(clientScripts.intake).toContain('body: JSON.stringify({ confirm: true })');
   });
 
   it('enables initialization retry and reaches ready after a transient failure', async () => {

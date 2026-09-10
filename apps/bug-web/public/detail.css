@@ -1,0 +1,138 @@
+body {
+  margin: 0;
+  background: #f5f7fb;
+  color: #182230;
+  font: 14px system-ui, sans-serif;
+}
+header {
+  background: #182230;
+  color: #fff;
+  padding: 18px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+header button {
+  background: #2563eb;
+  color: #fff;
+  border: 0;
+  border-radius: 5px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+main {
+  max-width: 1100px;
+  margin: 20px auto;
+  padding: 0 16px;
+}
+.card {
+  background: #fff;
+  border: 1px solid #dce2ea;
+  border-radius: 10px;
+  padding: 16px;
+  margin: 12px 0;
+}
+h2 {
+  margin: 0 0 10px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.label {
+  color: #637083;
+  font-size: 12px;
+}
+.value {
+  white-space: pre-wrap;
+  margin-top: 4px;
+}
+.loading, .error, .empty {
+  padding: 30px;
+  text-align: center;
+}
+.error {
+  color: #b42318;
+  background: #fff0f0;
+}
+.meta {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  color: #637083;
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+.muted {
+  color: #637083;
+}
+.markdown {
+  background: #fff;
+  border: 1px solid #dce2ea;
+  border-radius: 10px;
+  padding: 20px 24px;
+  line-height: 1.7;
+}
+.markdown h1 {
+  font-size: 22px;
+  margin: 16px 0 10px;
+}
+.markdown h2 {
+  font-size: 18px;
+  margin: 18px 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #edf0f4;
+}
+.markdown h3 {
+  font-size: 15px;
+  margin: 14px 0 6px;
+}
+.markdown h4, .markdown h5, .markdown h6 {
+  font-size: 14px;
+  margin: 12px 0 6px;
+}
+.markdown p {
+  margin: 8px 0;
+}
+.markdown ul, .markdown ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+.markdown li {
+  margin: 4px 0;
+}
+.markdown blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid #bcc7d5;
+  color: #42506b;
+}
+.markdown code {
+  background: #f0f2f6;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 13px;
+}
+.markdown pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 14px;
+  overflow: auto;
+}
+.markdown pre code {
+  background: none;
+  color: inherit;
+  padding: 0;
+}
+.markdown a {
+  color: #155eef;
+}
+.markdown hr {
+  border: 0;
+  border-top: 1px solid #edf0f4;
+  margin: 14px 0;
+}

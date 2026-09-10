@@ -63,7 +63,24 @@ const jsonBody = async (request) => {
     return parsed;
 };
 const send = (response, status, body) => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, idempotency-key', 'access-control-allow-methods': 'GET,POST,PATCH,PUT,OPTIONS' }); response.end(JSON.stringify(body)); };
-const sendHtml = (response, body) => { response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-content-type-options': 'nosniff' }); response.end(body); };
+const sendPage = (response, result) => {
+    if (typeof result === 'string') {
+        response.writeHead(200, {
+            'content-type': 'text/html; charset=utf-8',
+            'x-content-type-options': 'nosniff',
+        });
+        response.end(result);
+        return;
+    }
+    const status = result.status ?? 200;
+    const headers = {
+        'content-type': result.contentType,
+        'x-content-type-options': 'nosniff',
+        ...(result.headers ?? {}),
+    };
+    response.writeHead(status, headers);
+    response.end(result.body);
+};
 /** An in-flight message failure carrying the exact JSON error payload to return. */
 class MessageProcessingError extends Error {
     status;
@@ -248,7 +265,7 @@ export class BugApiServer {
             }
             const page = method === 'GET' ? this.pageRenderer?.(path) : undefined;
             if (page !== undefined) {
-                sendHtml(response, page);
+                sendPage(response, page);
                 return;
             }
             send(response, 404, { error: 'Route not found' });
@@ -775,7 +792,7 @@ export class BugApiServer {
     }
     retryBug(bug, response) {
         const status = this.statusFor(bug);
-        const failedStatuses = ['FIX_FAILED', 'ENVIRONMENT_FAILED', 'VALIDATION_FAILED', 'REVIEW_REJECTED', 'PUSH_FAILED', 'BLOCKED'];
+        const failedStatuses = ['FIX_FAILED', 'FIX_CANDIDATE', 'ENVIRONMENT_FAILED', 'VALIDATION_FAILED', 'REVIEW_REJECTED', 'PUSH_FAILED', 'BLOCKED'];
         const jobs = this.jobsFor(bug);
         const candidate = [...jobs].reverse().find((job) => job.status === 'FAILED' || job.status === 'INTERRUPTED');
         if (!failedStatuses.includes(status) && !candidate) {

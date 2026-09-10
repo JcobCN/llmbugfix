@@ -7,15 +7,17 @@ import { openDatabase, SQLiteBugRepository } from '@llmbugfix/bug-repository';
 import { JobQueue } from '@llmbugfix/job-queue';
 import { FakeIntakeModel, IntakeService } from '@llmbugfix/intake-agent';
 import { BugApiServer } from './index.js';
+import { resolveWebRoute } from '../../bug-web/src/index.js';
 describe('Bug API routes', () => {
     let db;
+    let repository;
     let server;
     const userId = newId();
     beforeEach(() => {
         db = openDatabase(':memory:');
-        const repo = new SQLiteBugRepository(db);
-        repo.createUser({ id: userId, displayName: 'QA Tester', email: 'tester@internal.local' });
-        server = new BugApiServer({}, repo, new IntakeService(new FakeIntakeModel()));
+        repository = new SQLiteBugRepository(db);
+        repository.createUser({ id: userId, displayName: 'QA Tester', email: 'tester@internal.local' });
+        server = new BugApiServer({}, repository, new IntakeService(new FakeIntakeModel()));
     });
     afterEach(() => db.close());
     it('creates, interviews, patches and explicitly submits a conversation', async () => {
@@ -34,8 +36,8 @@ describe('Bug API routes', () => {
         expect(rejected.data.completeness.readyForConfirmation).toBe(false);
         expect(rejected.data.completeness.score).toBeLessThan(65);
         expect(rejected.data.draft).toMatchObject({ actualBehavior: '登录按钮一直 loading' });
-        expect(server.repo.getConversation(id)?.status).toBe('active');
-        expect(server.repo.listBugs()).toHaveLength(0);
+        expect(repository.getConversation(id)?.status).toBe('active');
+        expect(repository.listBugs()).toHaveLength(0);
         await server.inject({ method: 'PATCH', url: `/api/bugs/conversations/${id}/draft`, body: { draft: { component: 'login', environmentProfile: { name: 'storefront', repositoryUrl: 'https://git.example.test/team/storefront.git' } } } });
         const submitted = await server.inject({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirmed: true } });
         expect(submitted.status, submitted.raw).toBe(201);
@@ -116,8 +118,8 @@ describe('Bug API routes', () => {
         expect(provisioned).toEqual([expect.objectContaining({ repositoryUrl: 'https://git.example.test/team/storefront.git', target: 'frontend' })]);
     });
     it('keeps an incomplete intake active, then creates one queued Bug and one Job after supplementation', async () => {
-        const queue = new JobQueue(server.repo, fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-api-queue-')));
-        const queuedServer = new BugApiServer({}, { repo: server.repo, intake: new IntakeService(new FakeIntakeModel()), queue });
+        const queue = new JobQueue(repository, fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-api-queue-')));
+        const queuedServer = new BugApiServer({}, { repo: repository, intake: new IntakeService(new FakeIntakeModel()), queue });
         const created = await queuedServer.inject({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
         const id = created.data.id;
         await queuedServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${id}/draft`, body: { draft: { actualBehavior: '按钮卡住', expectedBehavior: '正常跳转', component: 'login' } } });
@@ -126,7 +128,7 @@ describe('Bug API routes', () => {
         expect(rejected.data.code).toBe('INTAKE_INCOMPLETE');
         expect(rejected.data.completeness.score).toBeLessThan(65);
         expect(rejected.data.conversation.status).toBe('active');
-        expect(server.repo.listBugs()).toHaveLength(0);
+        expect(repository.listBugs()).toHaveLength(0);
         expect(queue.listJobs()).toHaveLength(0);
         const supplemented = await queuedServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${id}/draft`, body: { draft: { environmentProfile: { name: 'storefront', repositoryUrl: 'https://git.example.test/team/storefront.git' } } } });
         expect(supplemented.status, supplemented.raw).toBe(200);
@@ -134,13 +136,13 @@ describe('Bug API routes', () => {
         expect(submitted.status, submitted.raw).toBe(201);
         expect(submitted.data.status).toBe('QUEUED');
         expect(submitted.data.job?.id).toBeTruthy();
-        expect(server.repo.listBugs()).toHaveLength(1);
+        expect(repository.listBugs()).toHaveLength(1);
         expect(queue.listJobs()).toHaveLength(1);
         const repeated = await queuedServer.inject({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirm: true } });
         expect(repeated.status, repeated.raw).toBe(200);
         expect(repeated.data.idempotent).toBe(true);
         expect(repeated.data.bugKey).toBe(submitted.data.bugKey);
-        expect(server.repo.listBugs()).toHaveLength(1);
+        expect(repository.listBugs()).toHaveLength(1);
         expect(queue.listJobs()).toHaveLength(1);
     });
     it('keeps Chat and editable Markdown synchronized through revisioned reconciliation', async () => {
@@ -305,6 +307,73 @@ describe('Bug API routes', () => {
         const payload = JSON.parse(errorBlock.match(/^data: (.+)$/m)[1]);
         expect(payload.status).toBe(500);
         expect(payload.error).toContain('Intake LLM exploded');
+    });
+    it('exposes candidate artifacts and retries FIX_CANDIDATE as a queued job', async () => {
+        const conversation = repository.createConversation({ id: newId(), reporterId: userId, status: 'active', draft: {}, completeness: { score: 85, dimensions: { problem: 25, reproduction: 30, environment: 10, evidence: 10, impact: 10 }, missingCriticalInformation: [], recommendedQuestions: [], readyForSubmission: true } });
+        const bug = repository.createBug({ title: 'Candidate retry', productArea: null, component: null, bugType: 'functional', executionTarget: 'frontend', environmentProfileId: 'frontend-main', severity: 'medium', actualBehavior: 'Button is stuck', expectedBehavior: 'Button responds', reproduction: { reproducible: true, frequency: 'always', prerequisites: [], steps: ['Click button'], testData: [] }, environment: { environmentName: 'test', appVersion: '1.0', buildNumber: null, commitSha: null, additionalInfo: {} }, evidence: { errorMessages: [], stackTraces: [], logs: [], screenshots: [], videos: [], networkTraces: [], jsonFiles: [], otherFiles: [] }, impact: { affectedUsers: null, scope: 'some_users', blocksTesting: false, workaroundExists: false, workaround: null }, regression: { isRegression: false, lastKnownGoodVersion: null, suspectedVersion: null }, observations: [], reporterHypotheses: [], reporter: { userId, displayName: 'QA Tester' }, intake: { completenessScore: 85, confidence: 1, missingInformation: [], conversationId: conversation.id, llmSummary: 'Candidate' } });
+        for (const status of ['COLLECTING', 'READY_FOR_CONFIRMATION', 'SUBMITTED', 'TRIAGING', 'QUEUED', 'PREPARING_ENV', 'FIXING', 'FIX_CANDIDATE'])
+            repository.changeBugStatus(bug.bugKey, status);
+        const queue = new JobQueue(repository, fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-api-queue-')));
+        const job = queue.enqueueJob(bug.id, bug.bugKey);
+        const running = queue.claimNextJob('api-test-worker');
+        expect(running?.status).toBe('RUNNING');
+        queue.failJob(job.id, 'completion format failed', 'api-test-worker');
+        const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-api-artifacts-'));
+        const artifactDir = path.join(artifactRoot, 'agent-results', bug.bugKey);
+        fs.mkdirSync(artifactDir, { recursive: true });
+        fs.writeFileSync(path.join(artifactDir, 'candidate.json'), '{"bugKey":"' + bug.bugKey + '"}\n');
+        fs.writeFileSync(path.join(artifactDir, 'diff.patch'), 'candidate patch\n');
+        const candidateServer = new BugApiServer({ DATA_ROOT: artifactRoot }, { repo: repository, queue, intake: new IntakeService(new FakeIntakeModel()) });
+        const artifacts = await candidateServer.inject({ url: `/api/bugs/${bug.bugKey}/artifacts` });
+        expect(artifacts.status).toBe(200);
+        expect(artifacts.data.files).toContain('candidate.json');
+        expect(artifacts.data.files).toContain('diff.patch');
+        const retried = await candidateServer.inject({ method: 'POST', url: `/api/bugs/${bug.bugKey}/retry` });
+        expect(retried.status, retried.raw).toBe(200);
+        expect(retried.data.bug.status).toBe('QUEUED');
+        expect(retried.data.job.status).toBe('QUEUED');
+        expect(retried.data.automatic).toBe(false);
+        expect(repository.getBug(bug.bugKey)).toMatchObject({ bugKey: bug.bugKey });
+        expect(repository.database.prepare('SELECT status FROM bug_reports WHERE bug_key = ?').get(bug.bugKey).status).toBe('QUEUED');
+    });
+    it('serves pages and static assets with correct MIME types and headers via pageRenderer', async () => {
+        const webServer = new BugApiServer({}, { repo: repository, intake: new IntakeService(new FakeIntakeModel()), pageRenderer: resolveWebRoute });
+        const intake = await webServer.inject({ method: 'GET', url: '/' });
+        expect(intake.status).toBe(200);
+        expect(intake.headers['content-type']).toBe('text/html; charset=utf-8');
+        expect(intake.headers['x-content-type-options']).toBe('nosniff');
+        expect(intake.raw).toContain('Bug Intake');
+        expect(intake.raw).toContain('<script src="/static/intake.js"></script>');
+        const dashboard = await webServer.inject({ method: 'GET', url: '/dashboard' });
+        expect(dashboard.status).toBe(200);
+        expect(dashboard.headers['content-type']).toBe('text/html; charset=utf-8');
+        expect(dashboard.raw).toContain('Bug Dashboard');
+        expect(dashboard.raw).toContain('<script src="/static/dashboard.js"></script>');
+        const detail = await webServer.inject({ method: 'GET', url: '/bugs/BUG-000123' });
+        expect(detail.status).toBe(200);
+        expect(detail.headers['content-type']).toBe('text/html; charset=utf-8');
+        expect(detail.raw).toContain('Bug detail');
+        expect(detail.raw).toContain('<script src="/static/detail.js"></script>');
+        const js = await webServer.inject({ method: 'GET', url: '/static/intake.js' });
+        expect(js.status).toBe(200);
+        expect(js.headers['content-type']).toBe('application/javascript; charset=utf-8');
+        expect(js.headers['x-content-type-options']).toBe('nosniff');
+        expect(js.headers['cache-control']).toBe('no-cache');
+        expect(js.raw).toContain('let pageState');
+        const css = await webServer.inject({ method: 'GET', url: '/static/intake.css' });
+        expect(css.status).toBe(200);
+        expect(css.headers['content-type']).toBe('text/css; charset=utf-8');
+        expect(css.headers['cache-control']).toBe('no-cache');
+        const unknownStatic = await webServer.inject({ method: 'GET', url: '/static/nonexistent.js' });
+        expect(unknownStatic.status).toBe(404);
+        const nonGetStatic = await webServer.inject({ method: 'POST', url: '/static/intake.js' });
+        expect(nonGetStatic.status).toBe(404);
+        // Legacy string-return pageRenderer backward compatibility
+        const legacyServer = new BugApiServer({}, { repo: repository, pageRenderer: (path) => (path === '/legacy' ? '<h1>Legacy</h1>' : undefined) });
+        const legacy = await legacyServer.inject({ method: 'GET', url: '/legacy' });
+        expect(legacy.status).toBe(200);
+        expect(legacy.headers['content-type']).toBe('text/html; charset=utf-8');
+        expect(legacy.raw).toBe('<h1>Legacy</h1>');
     });
 });
 //# sourceMappingURL=api.test.js.map

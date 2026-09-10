@@ -33,7 +33,14 @@ type EnvironmentSource = {
         target: 'frontend' | 'backend';
     }) => Promise<ProvisionedEnvironmentProfile> | ProvisionedEnvironmentProfile;
 };
-export type PageRenderer = (pathname: string) => string | undefined;
+export type PageResponse = {
+    body: string | Buffer;
+    contentType: string;
+    headers?: Record<string, string>;
+    status?: number;
+};
+export type PageRendererResult = string | PageResponse;
+export type PageRenderer = (pathname: string) => PageRendererResult | undefined;
 export type ApiDependencies = {
     repo: BugRepository;
     intake?: IntakeService;

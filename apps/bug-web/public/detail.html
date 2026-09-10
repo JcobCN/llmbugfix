@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bug detail</title>
+  <link rel="stylesheet" href="/static/detail.css">
+</head>
+<body>
+  <header>
+    <a href="/dashboard" style="color:#fff">← Dashboard</a>
+    <strong id="heading">Bug detail</strong>
+    <button id="view-toggle" type="button">开发视图（结构化数据）</button>
+  </header>
+  <main id="app">
+    <div id="loading" class="loading">Loading bug detail…</div>
+    <section id="markdown-view" class="markdown" hidden></section>
+    <div id="structured-view" hidden></div>
+  </main>
+  <script src="/static/detail.js"></script>
+</body>
+</html>

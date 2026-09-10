@@ -32,12 +32,19 @@ for (const name of packages) {
 
 // The local server imports the orchestrator through its workspace export as
 // well, so mirror its emitted runtime files just like the package modules.
-const appPackages = ['orchestrator'];
+const appPackages = ['orchestrator', 'bug-web'];
 for (const name of appPackages) {
   const source = resolve('apps', name, 'src');
   if (!existsSync(source)) continue;
   cpSync(source, resolve('apps', name, 'dist'), {
     recursive: true,
     filter: (entry) => statSync(entry).isDirectory() || outputFile.test(entry),
+  });
+}
+
+const bugWebPublic = resolve('apps', 'bug-web', 'public');
+if (existsSync(bugWebPublic)) {
+  cpSync(bugWebPublic, resolve('apps', 'bug-web', 'dist', 'public'), {
+    recursive: true,
   });
 }

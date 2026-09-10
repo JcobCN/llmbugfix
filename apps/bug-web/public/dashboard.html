@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bug Dashboard</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <header>
+    <strong>Bug Dashboard</strong>
+    <a href="/" style="color:#fff">New report</a>
+  </header>
+  <main>
+    <div class="toolbar">
+      <input id="q" placeholder="Search key or title">
+      <select id="target">
+        <option value="">All targets</option>
+        <option value="frontend">Frontend</option>
+        <option value="backend">Backend</option>
+      </select>
+      <select id="status">
+        <option value="">All statuses</option>
+        <option>QUEUED</option>
+        <option>FIXING</option>
+        <option>FIX_READY</option>
+        <option>FIX_CANDIDATE</option>
+        <option>FAILED</option>
+        <option>NEEDS_INFO</option>
+        <option>READY_FOR_HUMAN_REVIEW</option>
+      </select>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+    <div id="state" class="loading">Loading bugs…</div>
+    <div id="table" class="table" hidden>
+      <table>
+        <thead>
+          <tr>
+            <th>Bug Key</th>
+            <th>Title</th>
+            <th>Target</th>
+            <th>Status</th>
+            <th>Completeness</th>
+            <th>Created</th>
+            <th>Fix Branch</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </main>
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

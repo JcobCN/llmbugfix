@@ -13,7 +13,7 @@ import { RepoManager } from '@llmbugfix/repo-manager';
 import { createLogger, parseConfig } from '@llmbugfix/shared';
 import { CommandRunner, Validator } from '@llmbugfix/validator';
 import { Orchestrator } from '@llmbugfix/orchestrator';
-import { renderDashboardHtml, renderDetailHtml, renderIndexHtml } from '../../bug-web/src/index.js';
+import { resolveWebRoute } from '../../bug-web/src/index.js';
 import { BugApiServer } from './index.js';
 function loadDotEnv(filename = '.env') {
     if (!fs.existsSync(filename))
@@ -103,7 +103,8 @@ if (llmEnabled) {
     const worktreesRoot = path.resolve(config.DATA_ROOT, 'worktrees');
     const repositoriesRoot = path.resolve(config.DATA_ROOT, 'repositories');
     const repositories = profiles.map((profile) => profile.repository);
-    const repoManager = new RepoManager({ worktreesRoot, repositoryRoots: repositories, cloneRoot: repositoriesRoot });
+    const allowedRemoteHosts = (process.env.GIT_ALLOWED_HOSTS ?? '').split(',').map((h) => h.trim()).filter(Boolean);
+    const repoManager = new RepoManager({ worktreesRoot, repositoryRoots: repositories, cloneRoot: repositoriesRoot, allowedRemoteHosts });
     for (const repository of repositories)
         repoManager.validateRepoUrl(repository);
     const validBranch = (value) => /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/u.test(value) && !value.includes('..') && !value.includes('//') && !value.endsWith('/');
@@ -150,14 +151,7 @@ if (llmEnabled) {
         orchestrator = new Orchestrator(config, repo, queue, environmentResolver, repoManager, environmentRunner, agentRunner, new Validator(commandRunner), { dryRun: process.env.DRY_RUN !== 'false' });
     }
 }
-const pageRenderer = (pathname) => {
-    if (pathname === '/')
-        return renderIndexHtml();
-    if (pathname === '/dashboard')
-        return renderDashboardHtml();
-    const detail = pathname.match(/^\/bugs\/([^/]+)$/u);
-    return detail ? renderDetailHtml(decodeURIComponent(detail[1])) : undefined;
-};
+const pageRenderer = (pathname) => resolveWebRoute(pathname);
 const api = new BugApiServer({ ...process.env, ...config, DRY_RUN: process.env.DRY_RUN ?? true }, { repo, intake, queue, attachments, environments: environments ?? environmentResolver, pageRenderer });
 const host = process.env.BUGFIX_LISTEN_HOST ?? '127.0.0.1';
 const port = await api.listen(portFromEnv(process.env.PORT), host);

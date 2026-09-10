@@ -1,8 +1,19 @@
+export type StaticAsset = {
+    body: string;
+    contentType: string;
+    headers?: Record<string, string>;
+};
+export declare const clientScripts: {
+    readonly intake: string;
+    readonly dashboard: string;
+    readonly detail: string;
+};
+export declare const intakeClientScript: string;
+export declare const dashboardClientScript: string;
+export declare const detailClientScript: string;
 export declare function renderIndexHtml(): string;
-/** Dashboard is deliberately server-rendered as a tiny dependency-free page.
- * All state comes from the API, so refreshes never expose a stale in-memory UI. */
 export declare function renderDashboardHtml(): string;
-/** Detail view intentionally renders all pipeline sections, including sections
- * that are not available until the worker reaches that stage. */
-export declare function renderDetailHtml(bugId?: string): string;
+export declare function renderDetailHtml(_bugId?: string): string;
+export declare function getStaticAsset(pathname: string): StaticAsset | undefined;
+export declare function resolveWebRoute(pathname: string): StaticAsset | undefined;
 //# sourceMappingURL=index.d.ts.map

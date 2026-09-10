@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bug Intake</title>
+  <link rel="stylesheet" href="/static/intake.css">
+</head>
+<body>
+  <header>
+    <strong>Bug Intake</strong>
+    <span>
+      <span id="state" role="status" aria-live="polite">正在创建会话…</span> · <a href="/dashboard">Dashboard</a>
+    </span>
+  </header>
+  <main>
+    <section id="success-card" class="success-card" role="status" aria-live="polite" aria-atomic="true" hidden>
+      <h2>Bug 已提交</h2>
+      <p><strong>Bug Key：</strong><a id="bug-key-link" href="#"><span id="bug-key"></span></a></p>
+      <p><strong>状态：</strong><span id="submitted-status"></span></p>
+      <p><strong>完整度：</strong><span id="submitted-score"></span></p>
+      <p id="submitted-explanation"></p>
+      <nav class="success-actions" aria-label="已提交报告操作">
+        <a id="bug-detail-link" href="#">查看 Bug 详情</a>
+        <a href="/dashboard">前往 Dashboard</a>
+        <a href="/">创建新报告</a>
+      </nav>
+    </section>
+    <div class="layout">
+      <section class="panel">
+        <h2>Chat</h2>
+        <div id="error" class="error" role="alert" aria-live="assertive" hidden></div>
+        <div id="messages"><p class="muted">正在创建会话…</p></div>
+        <div class="composer">
+          <textarea id="message" aria-label="Describe the bug" placeholder="请直接描述你遇到的问题…"></textarea>
+          <button id="send" type="button">发送</button>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Bug Report (Markdown)</h2>
+        <div class="document-meta">
+          <span>可直接编辑报告内容</span>
+          <span>保存：<b id="document-save-state">saved</b> · 同步：<b id="document-sync-state">synced</b></span>
+        </div>
+        <textarea id="markdown-editor" aria-label="Editable Markdown bug report" spellcheck="false" placeholder="# 未命名问题"></textarea>
+        <button id="reload-server-document" type="button" hidden>载入服务端最新版本</button>
+        <div class="score">Completeness: <span id="score">0</span>/100</div>
+        <p id="missing" class="muted">等待对话信息…</p>
+        <p class="muted">你可以继续补充，也可以直接修改右侧 Markdown；确认提交前会自动保存并检查同步状态。</p>
+        <button id="continue" type="button">继续补充</button>
+        <button id="submit" class="submit" type="button">确认提交</button>
+        <button id="retry-init" type="button" hidden>重试加载</button>
+      </section>
+    </div>
+  </main>
+  <script src="/static/intake.js"></script>
+</body>
+</html>

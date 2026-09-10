@@ -26,7 +26,14 @@ type EnvironmentSource = {
   /** Creates a local checkout + generated profile after the reporter confirms. */
   provisionProfile?: (proposal: EnvironmentProfileProposal & { target: 'frontend' | 'backend' }) => Promise<ProvisionedEnvironmentProfile> | ProvisionedEnvironmentProfile;
 };
-export type PageRenderer = (pathname: string) => string | undefined;
+export type PageResponse = {
+  body: string | Buffer;
+  contentType: string;
+  headers?: Record<string, string>;
+  status?: number;
+};
+export type PageRendererResult = string | PageResponse;
+export type PageRenderer = (pathname: string) => PageRendererResult | undefined;
 export type ApiDependencies = { repo: BugRepository; intake?: IntakeService; queue?: QueueLike; environments?: EnvironmentSource; attachments?: Parameters<typeof createAttachmentRoutes>[0]['attachments']; pageRenderer?: PageRenderer; documentStore?: BugDocumentStore };
 export type InjectRequest = { method?: string; url: string; headers?: Record<string, string>; body?: unknown };
 export type InjectResponse<T = unknown> = { status: number; headers: Record<string, string>; data: T; raw: string };
@@ -73,7 +80,24 @@ const jsonBody = async (request: http.IncomingMessage): Promise<Record<string, u
   return parsed as Record<string, unknown>;
 };
 const send = (response: http.ServerResponse, status: number, body: unknown): void => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, idempotency-key', 'access-control-allow-methods': 'GET,POST,PATCH,PUT,OPTIONS' }); response.end(JSON.stringify(body)); };
-const sendHtml = (response: http.ServerResponse, body: string): void => { response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-content-type-options': 'nosniff' }); response.end(body); };
+const sendPage = (response: http.ServerResponse, result: PageRendererResult): void => {
+  if (typeof result === 'string') {
+    response.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'x-content-type-options': 'nosniff',
+    });
+    response.end(result);
+    return;
+  }
+  const status = result.status ?? 200;
+  const headers: Record<string, string> = {
+    'content-type': result.contentType,
+    'x-content-type-options': 'nosniff',
+    ...(result.headers ?? {}),
+  };
+  response.writeHead(status, headers);
+  response.end(result.body);
+};
 
 /** An in-flight message failure carrying the exact JSON error payload to return. */
 class MessageProcessingError extends Error {
@@ -173,7 +197,7 @@ export class BugApiServer {
       }
       if (bugMatch) { await this.handleBug(bugMatch[1], bugMatch[2], method, response); return; }
       const page = method === 'GET' ? this.pageRenderer?.(path) : undefined;
-      if (page !== undefined) { sendHtml(response, page); return; }
+      if (page !== undefined) { sendPage(response, page); return; }
       send(response, 404, { error: 'Route not found' });
     } catch (error) { this.logger.error(safeLogContext({ path, method, error: error instanceof Error ? error.message : String(error) }), 'request failed'); send(response, error instanceof SyntaxError ? 400 : 500, { error: error instanceof Error ? error.message : String(error) }); }
   }

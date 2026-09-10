@@ -7,6 +7,7 @@ import { openDatabase, SQLiteBugRepository } from '@llmbugfix/bug-repository';
 import { JobQueue } from '@llmbugfix/job-queue';
 import { FakeIntakeModel, IntakeService, type DocumentReconciliationInput, type IntakeModel, type IntakeModelInput, type IntakeTurnResult } from '@llmbugfix/intake-agent';
 import { BugApiServer } from './index.js';
+import { resolveWebRoute } from '../../bug-web/src/index.js';
 
 describe('Bug API routes', () => {
   let db: ReturnType<typeof openDatabase>;
@@ -279,5 +280,53 @@ describe('Bug API routes', () => {
     expect(retried.status, retried.raw).toBe(200); expect(retried.data.bug.status).toBe('QUEUED'); expect(retried.data.job.status).toBe('QUEUED'); expect(retried.data.automatic).toBe(false);
     expect(repository.getBug(bug.bugKey)).toMatchObject({ bugKey: bug.bugKey });
     expect((repository.database.prepare('SELECT status FROM bug_reports WHERE bug_key = ?').get(bug.bugKey) as { status: string }).status).toBe('QUEUED');
+  });
+
+  it('serves pages and static assets with correct MIME types and headers via pageRenderer', async () => {
+    const webServer = new BugApiServer({}, { repo: repository, intake: new IntakeService(new FakeIntakeModel()), pageRenderer: resolveWebRoute });
+
+    const intake = await webServer.inject({ method: 'GET', url: '/' });
+    expect(intake.status).toBe(200);
+    expect(intake.headers['content-type']).toBe('text/html; charset=utf-8');
+    expect(intake.headers['x-content-type-options']).toBe('nosniff');
+    expect(intake.raw).toContain('Bug Intake');
+    expect(intake.raw).toContain('<script src="/static/intake.js"></script>');
+
+    const dashboard = await webServer.inject({ method: 'GET', url: '/dashboard' });
+    expect(dashboard.status).toBe(200);
+    expect(dashboard.headers['content-type']).toBe('text/html; charset=utf-8');
+    expect(dashboard.raw).toContain('Bug Dashboard');
+    expect(dashboard.raw).toContain('<script src="/static/dashboard.js"></script>');
+
+    const detail = await webServer.inject({ method: 'GET', url: '/bugs/BUG-000123' });
+    expect(detail.status).toBe(200);
+    expect(detail.headers['content-type']).toBe('text/html; charset=utf-8');
+    expect(detail.raw).toContain('Bug detail');
+    expect(detail.raw).toContain('<script src="/static/detail.js"></script>');
+
+    const js = await webServer.inject({ method: 'GET', url: '/static/intake.js' });
+    expect(js.status).toBe(200);
+    expect(js.headers['content-type']).toBe('application/javascript; charset=utf-8');
+    expect(js.headers['x-content-type-options']).toBe('nosniff');
+    expect(js.headers['cache-control']).toBe('no-cache');
+    expect(js.raw).toContain('let pageState');
+
+    const css = await webServer.inject({ method: 'GET', url: '/static/intake.css' });
+    expect(css.status).toBe(200);
+    expect(css.headers['content-type']).toBe('text/css; charset=utf-8');
+    expect(css.headers['cache-control']).toBe('no-cache');
+
+    const unknownStatic = await webServer.inject({ method: 'GET', url: '/static/nonexistent.js' });
+    expect(unknownStatic.status).toBe(404);
+
+    const nonGetStatic = await webServer.inject({ method: 'POST', url: '/static/intake.js' });
+    expect(nonGetStatic.status).toBe(404);
+
+    // Legacy string-return pageRenderer backward compatibility
+    const legacyServer = new BugApiServer({}, { repo: repository, pageRenderer: (path) => (path === '/legacy' ? '<h1>Legacy</h1>' : undefined) });
+    const legacy = await legacyServer.inject({ method: 'GET', url: '/legacy' });
+    expect(legacy.status).toBe(200);
+    expect(legacy.headers['content-type']).toBe('text/html; charset=utf-8');
+    expect(legacy.raw).toBe('<h1>Legacy</h1>');
   });
 });
