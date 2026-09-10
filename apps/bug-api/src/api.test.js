@@ -32,7 +32,7 @@ describe('Bug API routes', () => {
         expect(patched.data.draft.executionTarget).toBe('frontend');
         const rejected = await server.inject({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirm: true } });
         expect(rejected.status, rejected.raw).toBe(422);
-        expect(rejected.data.code).toBe('INTAKE_INCOMPLETE');
+        expect(rejected.data.code).toBe('GIT_REPOSITORY_REQUIRED');
         expect(rejected.data.completeness.readyForConfirmation).toBe(false);
         expect(rejected.data.completeness.score).toBeLessThan(65);
         expect(rejected.data.draft).toMatchObject({ actualBehavior: '登录按钮一直 loading' });
@@ -90,7 +90,7 @@ describe('Bug API routes', () => {
             },
         });
         const created = await protectedServer.inject({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
-        await protectedServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${created.data.id}/draft`, body: { draft: { title: 'bad mapping', actualBehavior: 'broken', expectedBehavior: 'works', executionTarget: 'frontend', environmentProfileId: '/tmp/reporter-path' } } });
+        await protectedServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${created.data.id}/draft`, body: { draft: { title: 'bad mapping', actualBehavior: 'broken', expectedBehavior: 'works', executionTarget: 'frontend', environmentProfileId: '/tmp/reporter-path', environmentProfile: { repositoryUrl: 'https://git.example.test/team/storefront.git' } } } });
         const submitted = await protectedServer.inject({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/submit`, body: { confirm: true } });
         expect(submitted.status).toBe(422);
         expect(submitted.data.code).toBe('ENVIRONMENT_PROFILE_INVALID');
@@ -122,10 +122,11 @@ describe('Bug API routes', () => {
         const queuedServer = new BugApiServer({}, { repo: repository, intake: new IntakeService(new FakeIntakeModel()), queue });
         const created = await queuedServer.inject({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
         const id = created.data.id;
-        await queuedServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${id}/draft`, body: { draft: { actualBehavior: '按钮卡住', expectedBehavior: '正常跳转', component: 'login' } } });
+        await queuedServer.inject({ method: 'PATCH', url: `/api/bugs/conversations/${id}/draft`, body: { draft: { actualBehavior: '按钮卡住', expectedBehavior: '正常跳转', component: 'login', environmentProfileId: 'remote-existing-profile' } } });
         const rejected = await queuedServer.inject({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirm: true } });
         expect(rejected.status, rejected.raw).toBe(422);
-        expect(rejected.data.code).toBe('INTAKE_INCOMPLETE');
+        expect(rejected.data.code).toBe('GIT_REPOSITORY_REQUIRED');
+        expect(rejected.data.completeness.missingCriticalInformation).toContain('environmentProfile.repositoryUrl');
         expect(rejected.data.completeness.score).toBeLessThan(65);
         expect(rejected.data.conversation.status).toBe('active');
         expect(repository.listBugs()).toHaveLength(0);

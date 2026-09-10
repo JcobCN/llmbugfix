@@ -87,7 +87,7 @@ if (llmEnabled) {
   const profiles = environmentResolver.listProfiles();
   const intakeRequirements = loadIntakeInstructions(process.env.INTAKE_CONFIG_PATH ?? 'config/bug-intake.md');
   const allowedProjects = profiles.map(({ id, name, target }) => ({ id, name, target }));
-  const instructions = `${intakeRequirements}\n\nExisting project profiles (when applicable, use the exact id as environmentProfileId):\n${JSON.stringify(allowedProjects, null, 2)}\n\nFor a project not shown here, ask the tester for its remote Git clone address. Return the remote in environmentProfile.repositoryUrl so the server can clone it locally and generate the runnable profile after confirmation.`;
+  const instructions = `${intakeRequirements}\n\nExisting project profiles (when applicable, use the exact id as environmentProfileId):\n${JSON.stringify(allowedProjects, null, 2)}\n\nFor every report, an explicit remote Git clone address is required in the current draft, including when an existing profile is selected. A profile id never replaces it. Ask the tester for the remote when absent and return it in environmentProfile.repositoryUrl so the server can clone or verify it locally after confirmation.`;
   const intakeTimeoutMs = positiveInteger(process.env.INTAKE_LLM_TIMEOUT_MS, 60_000, 'INTAKE_LLM_TIMEOUT_MS');
   const intakeLlmLogger = process.env.INTAKE_LLM_LOG === '1' ? createLogger('intake-llm') : undefined;
   const llmOptions = { baseUrl: endpointUrl!, model: model!, ...(process.env.LLM_API_KEY?.trim() ? { apiKey: process.env.LLM_API_KEY.trim() } : {}), intakeInstructions: instructions, timeoutMs: intakeTimeoutMs, ...(intakeLlmLogger ? { logger: intakeLlmLogger } : {}) };

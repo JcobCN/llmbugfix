@@ -35,15 +35,18 @@ const known = (value: unknown): boolean => {
  * intake facts improve diagnosis, but are optional and must never hold up a
  * report which has this contract.
  *
- * A selected environmentProfileId is an already-known project/profile. It
- * therefore satisfies both the module identity and repository portions of the
- * contract even though the draft does not repeat the profile's details.
+ * A selected environmentProfileId may identify the module, but it never
+ * substitutes for the Git remote supplied in this intake.  The worker cannot
+ * be queued until the draft itself contains that address.
  */
+export function hasGitRepositoryAddress(draft: BugReportDraft): boolean {
+  return known(draft.environmentProfile?.repositoryUrl);
+}
+
 export function hasCoreSubmissionInformation(draft: BugReportDraft): boolean {
   const hasKnownProfile = known(draft.environmentProfileId);
   const hasModule = hasKnownProfile || known(draft.environmentProfile?.name) || known(draft.component) || known(draft.productArea);
-  const hasRepository = hasKnownProfile || known(draft.environmentProfile?.repositoryUrl);
-  return known(draft.actualBehavior) && known(draft.expectedBehavior) && hasModule && hasRepository;
+  return known(draft.actualBehavior) && known(draft.expectedBehavior) && hasModule && hasGitRepositoryAddress(draft);
 }
 
 function coreQuestionAnswered(draft: BugReportDraft, field: string): boolean {
@@ -51,7 +54,7 @@ function coreQuestionAnswered(draft: BugReportDraft, field: string): boolean {
     return known(draft.environmentProfileId) || known(draft.environmentProfile?.name) || known(draft.component) || known(draft.productArea);
   }
   if (field === 'environmentProfile.repositoryUrl') {
-    return known(draft.environmentProfileId) || known(draft.environmentProfile?.repositoryUrl);
+    return hasGitRepositoryAddress(draft);
   }
   return known(read(draft, field));
 }
@@ -81,7 +84,7 @@ export function evaluateCompleteness(draft: BugReportDraft): CompletenessEvaluat
   if (known(draft.actualBehavior)) problem += 15; else missing.push('actualBehavior');
   if (known(draft.expectedBehavior)) problem += 10; else missing.push('expectedBehavior');
   const moduleKnown = known(draft.environmentProfileId) || known(draft.environmentProfile?.name) || known(draft.component) || known(draft.productArea);
-  const repositoryKnown = known(draft.environmentProfileId) || known(draft.environmentProfile?.repositoryUrl);
+  const repositoryKnown = hasGitRepositoryAddress(draft);
   if (!moduleKnown) missing.push('environmentProfile.name');
   if (!repositoryKnown) missing.push('environmentProfile.repositoryUrl');
   const reproductionDraft = draft.reproduction; const steps = reproductionDraft?.steps ?? [];
@@ -89,7 +92,7 @@ export function evaluateCompleteness(draft: BugReportDraft): CompletenessEvaluat
   if (reproductionDraft?.frequency && reproductionDraft.frequency !== 'unknown') reproduction += 5;
   if (reproductionDraft?.reproducible !== null && reproductionDraft?.reproducible !== undefined) reproduction += 5;
   if (draft.executionTarget && draft.executionTarget !== 'unknown') environment += 7;
-  if (known(draft.environmentProfileId) || known(draft.environmentProfile?.repositoryUrl)) environment += 4;
+  if (repositoryKnown) environment += 4;
   if (known(draft.environment?.environmentName) || known(draft.environment?.appVersion) || known(draft.environment?.buildNumber)) environment += 4;
   const ev = draft.evidence;
   const evidenceCount = (ev?.errorMessages?.length ?? 0) + (ev?.stackTraces?.length ?? 0) + (ev?.logs?.length ?? 0) + (ev?.screenshots?.length ?? 0) + (ev?.networkTraces?.length ?? 0) + (ev?.jsonFiles?.length ?? 0) + (ev?.otherFiles?.length ?? 0);

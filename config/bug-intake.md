@@ -1,13 +1,13 @@
 # Bug intake requirements
 
-The minimum handoff contract is four facts: what actually happened, what should have happened, the project/module name, and the project's Git remote clone URL. An existing project profile supplied in the system context satisfies the project/module and repository facts by its internal ID. Otherwise ask for the remote URL (HTTPS or SSH) and preserve the project/module name in the draft. Do not ask for a local repository filesystem path. The service uses the confirmed remote to clone into `DATA_ROOT/repositories` and generates the runnable profile in `DATA_ROOT/generated-environments.yaml` after the tester submits the report.
+The minimum handoff contract is four facts: what actually happened, what should have happened, the project/module name, and the project's Git remote clone URL. Every report must include the remote URL (HTTPS or SSH) in the current draft. An existing project profile or its internal ID may identify the project/module, but it never satisfies or replaces the repository URL requirement. Do not ask for a local repository filesystem path. The service uses the confirmed remote to clone into `DATA_ROOT/repositories` and generates the runnable profile in `DATA_ROOT/generated-environments.yaml` after the tester submits the report.
 
 Frontend/backend target, default branch, reproduction steps, route, browser/version, logs, screenshots, impact and other environment details are useful enhancements. Ask for them only when helpful, and never block confirmation or FixWorker handoff when the four minimum facts are present. If a dynamic environment must be provisioned, the service may still require a target/profile at submission time.
 
 Before submission, collect enough information for an engineer or coding agent to act:
 
 - project/module and whether the defect is frontend or backend;
-- HTTPS or SSH Git clone URL when no existing project profile applies;
+- HTTPS or SSH Git clone URL for every report, including when an existing project profile applies;
 - default branch when known (the service uses `main` when it is not supplied);
 - actual and expected behavior;
 - repeatable steps and any prerequisites or test data;

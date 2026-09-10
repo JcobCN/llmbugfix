@@ -217,7 +217,7 @@ describe('Intake Agent & Service', () => {
     expect(markdown).toContain('- Project/Profile: frontend-main');
     const reconciled = reconcileBugDocument({ currentDraft: draft, markdown: markdown.replace('frontend-main', 'frontend-next'), documentRevision: 1, documentSha256: sha256Document(markdown.replace('frontend-main', 'frontend-next')) });
     expect(reconciled.fieldUpdates.environmentProfileId).toBe('frontend-next');
-    expect(renderBugDocument(draft, evaluateCompleteness(draft))).not.toContain('## Missing Information');
+    expect(renderBugDocument(draft, evaluateCompleteness(draft))).toContain('environmentProfile.repositoryUrl');
   });
 
   it('does not call the reconciler for a document whose content hash is already reconciled', async () => {

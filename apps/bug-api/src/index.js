@@ -6,7 +6,7 @@ import { newId, now } from '@llmbugfix/shared';
 import { BugReportSchema } from '@llmbugfix/bug-domain';
 import { DocumentPathError, DocumentRevisionConflictError, SQLiteBugDocumentStore } from '@llmbugfix/bug-repository';
 import { IntakeService, applyDocumentReconciliation, mergeBugDocument, mergeDraft } from '@llmbugfix/intake-agent';
-import { evaluateCompleteness } from '@llmbugfix/intake-policy';
+import { evaluateCompleteness, hasGitRepositoryAddress } from '@llmbugfix/intake-policy';
 import { createLogger, safeLogContext } from '@llmbugfix/shared';
 import { createAttachmentRoutes } from './attachment-routes.js';
 export const DEFAULT_API_CONFIG = {
@@ -589,6 +589,19 @@ export class BugApiServer {
         // or creating a Bug row; a high score alone is not sufficient when a core
         // fact is still missing.
         const completeness = evaluateCompleteness(draft);
+        if (!hasGitRepositoryAddress(draft)) {
+            const updated = updateConversation(this.repo, conversation.id, draft, completeness, 'active');
+            send(response, 422, {
+                error: '必须提供项目的 Git 仓库远程地址后才能提交 Bug',
+                code: 'GIT_REPOSITORY_REQUIRED',
+                status: updated.status,
+                completeness,
+                draft: updated.draft,
+                conversation: conversationResponse(this.repo, updated, this.readDocument(conversation.id)),
+                ...this.documentResponse(conversation.id, document),
+            });
+            return;
+        }
         if (!completeness.readyForConfirmation || completeness.score < 65) {
             const updated = updateConversation(this.repo, conversation.id, draft, completeness, 'active');
             send(response, 422, {

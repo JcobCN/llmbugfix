@@ -94,14 +94,16 @@ describe('Intake Policy & Completeness Scoring', () => {
     expect(questionStrategy(draft)).toEqual([]);
   });
 
-  it('treats an existing environment profile as the module and repository', () => {
+  it('does not let an existing environment profile replace the required Git remote', () => {
     const result = evaluateCompleteness({
       actualBehavior: '页面无响应',
       expectedBehavior: '页面正常切换',
       environmentProfileId: 'frontend-main',
     });
-    expect(result.readyForSubmission).toBe(true);
-    expect(result.missingCriticalInformation).toEqual([]);
+    expect(result.readyForSubmission).toBe(false);
+    expect(result.readyForConfirmation).toBe(false);
+    expect(result.missingCriticalInformation).toEqual(['environmentProfile.repositoryUrl']);
+    expect(result.recommendedQuestions).toContain('这个问题所在项目的 Git 仓库远程地址是什么？请提供 HTTPS 或 SSH clone 地址。');
   });
 
   it.each([
