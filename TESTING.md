@@ -9,12 +9,42 @@
 
    ```bash
    source ~/.nvm/nvm.sh
-   pnpm dev --host
+   pnpm dev -- --host
    ```
 
    服务监听 `0.0.0.0:8033`。可通过 `curl http://127.0.0.1:8033/api/health` 检查服务端健康状态。
 3. 从执行测试的环境访问 `http://kfjllm:8033/`，应返回 `200` 和 HTML 页面。若 SSH 机器本地访问正常、映射地址无法连接，应先排查端口映射与网络，而不是修改页面代码。
 4. 测试使用正常的缺陷描述，且不要包含 token、cookie、密码或真实账号密码。
+
+## 生产 bundle 回归检查
+
+`pnpm dev` 验证开发 watcher，但不能代替生产 bundle 检查。构建或依赖解析有改动时，应在 `kfjllm` 上从没有旧 workspace `dist/` 依赖的状态执行：
+
+```bash
+source ~/.nvm/nvm.sh
+cd ~/prj/llmbugfix
+pnpm build
+
+TEST_DATA_ROOT=$(mktemp -d)
+PORT=18033 \
+DATA_ROOT="$TEST_DATA_ROOT" \
+DATABASE_PATH="$TEST_DATA_ROOT/bugfix.sqlite" \
+LLM_ENDPOINT_URL= \
+LLM_MODEL= \
+PI_SANDBOX_PROFILE= \
+DRY_RUN=true \
+node dist/local-server.mjs
+```
+
+在另一个 SSH 会话检查：
+
+```bash
+curl --fail http://127.0.0.1:18033/api/health/ready
+curl --fail http://127.0.0.1:18033/
+curl --fail http://127.0.0.1:18033/dashboard
+```
+
+就绪响应应为 `ready`，两个页面应返回 HTML。还应通过 API 至少完成一次“创建会话 → 编辑草稿 → 提交 → 查询 → 取消”，以确认测试运行的是 `dist/local-server.mjs`，而不是 Vitest 直接转换的 TypeScript。完成后用 `Ctrl+C` 停止服务，并删除本次 `mktemp` 返回的测试数据目录。此检查使用空 LLM 配置和独立数据库，不会调用真实 Intake、Pi 或 Git；真实链路仍按下文专项流程验收。
 
 ## 推荐：Playwright MCP
 

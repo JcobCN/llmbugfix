@@ -47,7 +47,7 @@
 
 ## 当前离线验收事实
 
-- vitest run：15 suites、44 tests 通过。
-- tsc --noEmit、eslint packages/*/src apps/*/src tests、tsc -b --pretty false 均通过。
+- `pnpm test`：18 个测试文件、153 项测试通过。
+- `pnpm typecheck`、16 个子 workspace 的递归 typecheck、`pnpm lint` 和 `pnpm build` 均通过；TypeScript 只做 `--noEmit` 类型检查，运行产物由 esbuild 统一写入根 `dist/`。
 - E2E 使用 Fake Intake、Fake Pi、Disabled Vision 和 FakeCommandRunner；它验证状态机、gate 和 artifact，不声称已实际访问 GitLab、内网 LLM、真实 Pi SDK 或真实项目运行环境。
 - 系统不实现 Web Search、GitLab REST/GraphQL、Merge Request、自动 merge 或自动 deploy。

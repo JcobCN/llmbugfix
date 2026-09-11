@@ -93,17 +93,32 @@ pnpm test
 pnpm build
 ```
 
-如需检查各个已声明 workspace 包自己的构建脚本，可额外执行：
+注意：根目录 `pnpm build` 会先用 `tsc --noEmit` 检查整个仓库的类型，再由 esbuild 将服务打包到根目录 `dist/`，并复制 Web 静态资源。`src/` 中不会再产生 JavaScript、声明文件或 source map。部署或运行前仍应先执行该命令。
 
-```bash
-pnpm -r build
+构建后的目录结构为：
+
+```text
+dist/
+├── local-server.mjs
+├── local-server.mjs.map
+└── public/
 ```
 
-注意：根目录 `pnpm build` 是本仓库的完整源码校验和本地启动产物准备步骤；它会同步每个运行时 workspace（包括 `apps/orchestrator`）的 JavaScript、声明和 source map 到 `dist/`。部署或运行前仍应先执行该命令。
+`apps/*` 和 `packages/*` 都是仅供本仓库使用的 private workspace，用于划分代码和内部依赖，不提供独立发布、独立构建或直接 Node 导入接口。
 
 提交部署前应四项均通过。测试包含 API、附件、状态机、队列、环境解析、验证器、Git 管理器以及使用 fake 依赖的 pipeline E2E；它们不证明真实 Pi、内部 LLM、视觉服务、凭据、远程网络、GitLab 或生产部署可用。
 
 ## 5. 启动和部署方式
+
+`dist/` 是统一的编译产物目录，但不是可单独复制运行的完整部署包。esbuild 会将仓库内部 workspace 打入 `local-server.mjs`，同时保留 `better-sqlite3`、Pi SDK、Pino、Zod 等第三方依赖在运行时从 `node_modules` 加载。部署环境还必须提供配置、环境变量以及可写的 `DATA_ROOT`；启用真实 Intake 时还需要能读取 `INTAKE_CONFIG_PATH` 指向的 Markdown。除非这些路径都使用绝对路径重新配置，否则应从仓库根目录启动。
+
+生产式启动使用：
+
+```bash
+pnpm start
+```
+
+该命令先重新进行类型检查和 esbuild 构建，再执行 `node dist/local-server.mjs`。如果部署流程已经完成 `pnpm build`，也可以在仓库根目录直接执行后一个命令。
 
 ### 5.1 启动 UI/API-only 模式
 
@@ -117,7 +132,7 @@ pnpm dev
 
 浏览器打开 `http://127.0.0.1:8033/`；Dashboard 是 `http://127.0.0.1:8033/dashboard`，健康检查是 `http://127.0.0.1:8033/api/health/ready`。首次启动会在 `DATA_ROOT`（默认 `data/`）创建 SQLite 数据库、附件目录和队列锁文件。使用 `Ctrl+C` 正常停止，会释放锁文件。可通过 `PORT=3000 pnpm dev` 改端口；默认监听地址为 `127.0.0.1`，如需监听所有地址，使用 `pnpm dev -- --host`（监听 `0.0.0.0`）。当前 API 尚未实现认证授权，暴露到局域网前请确认网络可信。
 
-`pnpm dev` 使用 esbuild 打包并监听 TypeScript 源码；每次成功重建会自动重启本地 Node 服务，通常不需要等待完整 TypeScript 编译。它只负责快速转换，不做完整类型检查；提交前仍应运行 `pnpm typecheck`、`pnpm test` 和 `pnpm build`。`pnpm start` 保持为完整 `tsc` 构建后启动的验证命令，适合一次性手工验证。每次启动保留本地 `data/` 中的记录。若需要全新演示数据，请在服务停止后自行换一个 `DATA_ROOT`，例如 `DATA_ROOT=tmp-demo pnpm dev`。
+`pnpm dev` 使用 esbuild 打包并监听 TypeScript 源码；每次成功重建会自动重启本地 Node 服务。esbuild 只负责快速转换，不做完整类型检查，因此提交前仍应运行 `pnpm typecheck`、`pnpm test` 和 `pnpm build`。`pnpm start` 会完成类型检查和生产打包，然后运行 `dist/local-server.mjs`，适合一次性手工验证。每次启动保留本地 `data/` 中的记录。若需要全新演示数据，请在服务停止后自行换一个 `DATA_ROOT`，例如 `DATA_ROOT=tmp-demo pnpm dev`。
 
 ### 5.2 启动真实 Intake 和 Pi worker
 

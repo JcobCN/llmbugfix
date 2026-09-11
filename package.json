@@ -6,11 +6,11 @@
   "engines": { "node": ">=22.19.0" },
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "start": "pnpm build && node apps/bug-api/src/local-server.js",
+    "start": "pnpm build && node dist/local-server.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsc -b --pretty false && vitest run",
+    "test": "pnpm typecheck && vitest run",
     "lint": "eslint packages/*/src",
-    "build": "tsc -b --pretty false && node scripts/prepare-local-dist.mjs"
+    "build": "pnpm typecheck && node scripts/build.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.4",

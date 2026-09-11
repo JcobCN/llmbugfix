@@ -1,10 +1,13 @@
 {
   "name": "@llmbugfix/job-queue",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
-  "exports": { ".": "./dist/index.js" },
-  "types": "dist/index.d.ts",
-  "scripts": { "lint": "eslint src", "typecheck": "tsc --noEmit", "test": "vitest run", "build": "tsc" },
+  "scripts": {
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
   "dependencies": {
     "@llmbugfix/bug-repository": "workspace:*",
     "@llmbugfix/shared": "workspace:*"

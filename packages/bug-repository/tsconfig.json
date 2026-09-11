@@ -1,1 +1,6 @@
-{ "extends": "../../tsconfig.json", "compilerOptions": { "composite": true, "rootDir": "src", "outDir": "dist" }, "references": [{ "path": "../shared" }, { "path": "../bug-domain" }], "include": ["src"] }
+{
+  "extends": "../../tsconfig.json",
+  "include": [
+    "src"
+  ]
+}

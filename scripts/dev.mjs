@@ -68,6 +68,7 @@ async function restartServer() {
 if (existsSync(outputDir)) rmSync(outputDir, { recursive: true, force: true });
 const watcher = await context({
   absWorkingDir: process.cwd(),
+  tsconfig: 'tsconfig.json',
   entryPoints: ['apps/bug-api/src/local-server.ts'],
   outfile: outputFile,
   bundle: true,

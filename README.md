@@ -1,14 +1,18 @@
 # LLM Bugfix
 
-Offline-first TypeScript monorepo foundation for the V4 bug intake and repair workflow.
+Offline-first TypeScript monorepo application for the V4 bug intake and repair workflow.
 
 ```sh
-pnpm install --offline
+pnpm install --offline --frozen-lockfile
 pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
 ```
+
+All projects under `apps/*` and `packages/*` are private internal workspaces. They define code and dependency boundaries, but are not independently published, built, or imported by Node at runtime. `pnpm typecheck` uses `tsc --noEmit`; `pnpm build` then uses esbuild to produce the runnable service, source map, and Web assets under the single root `dist/` directory without writing generated files into `src/`.
+
+Use `pnpm start` for a production-style local run. It rebuilds and starts `dist/local-server.mjs` from the repository root. The `dist/` directory contains compiled application assets, not a standalone deployment: runtime `node_modules`, configuration, environment variables, and a writable `DATA_ROOT` must also be supplied.
 
 Run `pnpm dev` and open `http://127.0.0.1:8033/`. Without LLM settings this is a safe UI/API-only mode. `LLM_ENDPOINT_URL` and `LLM_MODEL` enable the real Intake conversation; the Pi repair worker additionally requires `PI_SANDBOX_PROFILE`, a name for an externally enforced host/container sandbox, and stays disabled when it is absent. Prompt text and `DRY_RUN` are not security boundaries. To listen on all interfaces, use `pnpm dev -- --host`. See [USAGE.md](USAGE.md) for the minimal configuration and safety boundary.
 
