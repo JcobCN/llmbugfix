@@ -10,13 +10,16 @@ importers:
     dependencies:
       '@earendil-works/pi-coding-agent':
         specifier: 0.84.4
-        version: 0.84.4(ws@8.21.3)(zod@3.25.76)
+        version: 0.84.4(supports-color@7.2.0)(ws@8.21.3)(zod@3.25.76)
       better-sqlite3:
         specifier: ^11.10.0
         version: 11.10.0
       drizzle-orm:
         specifier: ^0.38.4
         version: 0.38.4(@types/better-sqlite3@7.6.13)(better-sqlite3@11.10.0)
+      nodemailer:
+        specifier: ^7.0.6
+        version: 7.0.13
       pino:
         specifier: ^9.14.0
         version: 9.14.0
@@ -35,19 +38,19 @@ importers:
         version: 22.20.1
       '@typescript-eslint/parser':
         specifier: ^8.19.1
-        version: 8.68.0(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)
+        version: 8.68.0(eslint@9.39.5(jiti@2.7.0)(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
       esbuild:
         specifier: 0.21.5
         version: 0.21.5
       eslint:
         specifier: ^9.17.0
-        version: 9.39.5(jiti@2.7.0)
+        version: 9.39.5(jiti@2.7.0)(supports-color@7.2.0)
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
       vitest:
         specifier: ^2.1.9
-        version: 2.1.9(@types/node@22.20.1)
+        version: 2.1.9(@types/node@22.20.1)(supports-color@7.2.0)
 
   apps/bug-api:
     dependencies:
@@ -93,6 +96,9 @@ importers:
       '@llmbugfix/vision-provider':
         specifier: workspace:*
         version: link:../../packages/vision-provider
+      '@llmbugfix/weekly-email-report':
+        specifier: workspace:*
+        version: link:../../packages/weekly-email-report
 
   apps/bug-web: {}
 
@@ -152,6 +158,9 @@ importers:
       '@llmbugfix/shared':
         specifier: workspace:*
         version: link:../shared
+      '@llmbugfix/weekly-email-report':
+        specifier: workspace:*
+        version: link:../weekly-email-report
       better-sqlite3:
         specifier: ^11.7.0
         version: 11.10.0
@@ -214,7 +223,7 @@ importers:
     dependencies:
       '@earendil-works/pi-coding-agent':
         specifier: 0.84.4
-        version: 0.84.4(ws@8.21.3)(zod@3.25.76)
+        version: 0.84.4(supports-color@7.2.0)(ws@8.21.3)(zod@3.25.76)
       '@llmbugfix/bug-domain':
         specifier: workspace:*
         version: link:../bug-domain
@@ -256,6 +265,25 @@ importers:
         version: link:../shared
 
   packages/vision-provider: {}
+
+  packages/weekly-email-report:
+    dependencies:
+      '@llmbugfix/bug-domain':
+        specifier: workspace:*
+        version: link:../bug-domain
+      '@llmbugfix/shared':
+        specifier: workspace:*
+        version: link:../shared
+      nodemailer:
+        specifier: ^7.0.6
+        version: 7.0.13
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/nodemailer':
+        specifier: ^7.0.1
+        version: 7.0.12
 
 packages:
 
@@ -904,6 +932,9 @@ packages:
 
   '@types/node@22.20.1':
     resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
+
+  '@types/nodemailer@7.0.12':
+    resolution: {integrity: sha512-80vKwiIsVSyFA1rRovH59jNPLBOuc6dRZIHEu40gXTkBkZnQv8vog1xSGEb9j5q/tdMAs5ivvDR2pLTU0hGHXA==}
 
   '@types/retry@0.12.0':
     resolution: {integrity: sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA==}
@@ -1555,6 +1586,10 @@ packages:
     resolution: {integrity: sha512-dRB78srN/l6gqWulah9SrxeYnxeddIG30+GOqK/9OlLVyLg3HPnr6SqOWTWOXKRwC2eGYCkZ59NNuSgvSrpgOA==}
     engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
 
+  nodemailer@7.0.13:
+    resolution: {integrity: sha512-PNDFSJdP+KFgdsG3ZzMXCgquO7I6McjY2vlqILjtJd0hy8wEvtugS9xKRF2NWlPNGxvLCXlTNIae4serI7dinw==}
+    engines: {node: '>=6.0.0'}
+
   on-exit-leak-free@2.1.2:
     resolution: {integrity: sha512-0eJJY6hXLGf1udHwfNftBqH+g73EU4B504nZeKpz1sYRKafAghwxEJunB2O7rDZkL4PGfsMVnTXZ2EjibbqcsA==}
     engines: {node: '>=14.0.0'}
@@ -2162,9 +2197,9 @@ snapshots:
 
   '@babel/runtime@7.29.7': {}
 
-  '@earendil-works/pi-agent-core@0.84.4(ws@8.21.3)(zod@3.25.76)':
+  '@earendil-works/pi-agent-core@0.84.4(supports-color@7.2.0)(ws@8.21.3)(zod@3.25.76)':
     dependencies:
-      '@earendil-works/pi-ai': 0.84.4(ws@8.21.3)(zod@3.25.76)
+      '@earendil-works/pi-ai': 0.84.4(supports-color@7.2.0)(ws@8.21.3)(zod@3.25.76)
       '@earendil-works/pi-telemetry': 0.84.4
       diff: 8.0.4
       ignore: 7.0.5
@@ -2178,15 +2213,15 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-ai@0.84.4(ws@8.21.3)(zod@3.25.76)':
+  '@earendil-works/pi-ai@0.84.4(supports-color@7.2.0)(ws@8.21.3)(zod@3.25.76)':
     dependencies:
       '@anthropic-ai/sdk': 0.91.1(zod@3.25.76)
       '@aws-sdk/client-bedrock-runtime': 3.1048.0
       '@earendil-works/pi-telemetry': 0.84.4
-      '@google/genai': 1.52.0
+      '@google/genai': 1.52.0(supports-color@7.2.0)
       '@smithy/node-http-handler': 4.7.3
-      http-proxy-agent: 7.0.2
-      https-proxy-agent: 7.0.6
+      http-proxy-agent: 7.0.2(supports-color@7.2.0)
+      https-proxy-agent: 7.0.6(supports-color@7.2.0)
       openai: 6.40.0(ws@8.21.3)(zod@3.25.76)
       partial-json: 0.1.7
       typebox: 1.3.7
@@ -2202,10 +2237,10 @@ snapshots:
     dependencies:
       '@earendil-works/pi-protocol': 0.84.4
 
-  '@earendil-works/pi-coding-agent@0.84.4(ws@8.21.3)(zod@3.25.76)':
+  '@earendil-works/pi-coding-agent@0.84.4(supports-color@7.2.0)(ws@8.21.3)(zod@3.25.76)':
     dependencies:
-      '@earendil-works/pi-agent-core': 0.84.4(ws@8.21.3)(zod@3.25.76)
-      '@earendil-works/pi-ai': 0.84.4(ws@8.21.3)(zod@3.25.76)
+      '@earendil-works/pi-agent-core': 0.84.4(supports-color@7.2.0)(ws@8.21.3)(zod@3.25.76)
+      '@earendil-works/pi-ai': 0.84.4(supports-color@7.2.0)(ws@8.21.3)(zod@3.25.76)
       '@earendil-works/pi-client': 0.84.4
       '@earendil-works/pi-protocol': 0.84.4
       '@earendil-works/pi-tui': 0.84.4
@@ -2314,17 +2349,17 @@ snapshots:
   '@esbuild/win32-x64@0.21.5':
     optional: true
 
-  '@eslint-community/eslint-utils@4.10.1(eslint@9.39.5(jiti@2.7.0))':
+  '@eslint-community/eslint-utils@4.10.1(eslint@9.39.5(jiti@2.7.0)(supports-color@7.2.0))':
     dependencies:
-      eslint: 9.39.5(jiti@2.7.0)
+      eslint: 9.39.5(jiti@2.7.0)(supports-color@7.2.0)
       eslint-visitor-keys: 3.4.3
 
   '@eslint-community/regexpp@4.12.2': {}
 
-  '@eslint/config-array@0.21.2':
+  '@eslint/config-array@0.21.2(supports-color@7.2.0)':
     dependencies:
       '@eslint/object-schema': 2.1.7
-      debug: 4.4.3
+      debug: 4.4.3(supports-color@7.2.0)
       minimatch: 3.1.5
     transitivePeerDependencies:
       - supports-color
@@ -2337,10 +2372,10 @@ snapshots:
     dependencies:
       '@types/json-schema': 7.0.15
 
-  '@eslint/eslintrc@3.3.6':
+  '@eslint/eslintrc@3.3.6(supports-color@7.2.0)':
     dependencies:
       ajv: 6.15.0
-      debug: 4.4.3
+      debug: 4.4.3(supports-color@7.2.0)
       espree: 10.4.0
       globals: 14.0.0
       ignore: 5.3.2
@@ -2360,9 +2395,9 @@ snapshots:
       '@eslint/core': 0.17.0
       levn: 0.4.1
 
-  '@google/genai@1.52.0':
+  '@google/genai@1.52.0(supports-color@7.2.0)':
     dependencies:
-      google-auth-library: 10.9.1
+      google-auth-library: 10.9.1(supports-color@7.2.0)
       p-retry: 4.6.2
       protobufjs: 7.6.6
       ws: 8.21.3
@@ -2600,25 +2635,29 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
+  '@types/nodemailer@7.0.12':
+    dependencies:
+      '@types/node': 22.20.1
+
   '@types/retry@0.12.0': {}
 
-  '@typescript-eslint/parser@8.68.0(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)':
+  '@typescript-eslint/parser@8.68.0(eslint@9.39.5(jiti@2.7.0)(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)':
     dependencies:
       '@typescript-eslint/scope-manager': 8.68.0
       '@typescript-eslint/types': 8.68.0
-      '@typescript-eslint/typescript-estree': 8.68.0(typescript@5.9.3)
+      '@typescript-eslint/typescript-estree': 8.68.0(supports-color@7.2.0)(typescript@5.9.3)
       '@typescript-eslint/visitor-keys': 8.68.0
-      debug: 4.4.3
-      eslint: 9.39.5(jiti@2.7.0)
+      debug: 4.4.3(supports-color@7.2.0)
+      eslint: 9.39.5(jiti@2.7.0)(supports-color@7.2.0)
       typescript: 5.9.3
     transitivePeerDependencies:
       - supports-color
 
-  '@typescript-eslint/project-service@8.68.0(typescript@5.9.3)':
+  '@typescript-eslint/project-service@8.68.0(supports-color@7.2.0)(typescript@5.9.3)':
     dependencies:
       '@typescript-eslint/tsconfig-utils': 8.68.0(typescript@5.9.3)
       '@typescript-eslint/types': 8.68.0
-      debug: 4.4.3
+      debug: 4.4.3(supports-color@7.2.0)
       typescript: 5.9.3
     transitivePeerDependencies:
       - supports-color
@@ -2634,13 +2673,13 @@ snapshots:
 
   '@typescript-eslint/types@8.68.0': {}
 
-  '@typescript-eslint/typescript-estree@8.68.0(typescript@5.9.3)':
+  '@typescript-eslint/typescript-estree@8.68.0(supports-color@7.2.0)(typescript@5.9.3)':
     dependencies:
-      '@typescript-eslint/project-service': 8.68.0(typescript@5.9.3)
+      '@typescript-eslint/project-service': 8.68.0(supports-color@7.2.0)(typescript@5.9.3)
       '@typescript-eslint/tsconfig-utils': 8.68.0(typescript@5.9.3)
       '@typescript-eslint/types': 8.68.0
       '@typescript-eslint/visitor-keys': 8.68.0
-      debug: 4.4.3
+      debug: 4.4.3(supports-color@7.2.0)
       minimatch: 10.2.6
       semver: 7.8.5
       tinyglobby: 0.2.17
@@ -2700,15 +2739,15 @@ snapshots:
 
   acorn@8.18.0: {}
 
-  agent-base@7.1.0:
+  agent-base@7.1.0(supports-color@7.2.0):
     dependencies:
-      debug: 4.4.3
+      debug: 4.4.3(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
 
-  agent-base@7.1.2:
+  agent-base@7.1.2(supports-color@7.2.0):
     dependencies:
-      debug: 4.4.3
+      debug: 4.4.3(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
 
@@ -2809,9 +2848,11 @@ snapshots:
 
   data-uri-to-buffer@4.0.0: {}
 
-  debug@4.4.3:
+  debug@4.4.3(supports-color@7.2.0):
     dependencies:
       ms: 2.1.3
+    optionalDependencies:
+      supports-color: 7.2.0
 
   decompress-response@6.0.0:
     dependencies:
@@ -2881,14 +2922,14 @@ snapshots:
 
   eslint-visitor-keys@5.0.1: {}
 
-  eslint@9.39.5(jiti@2.7.0):
+  eslint@9.39.5(jiti@2.7.0)(supports-color@7.2.0):
     dependencies:
-      '@eslint-community/eslint-utils': 4.10.1(eslint@9.39.5(jiti@2.7.0))
+      '@eslint-community/eslint-utils': 4.10.1(eslint@9.39.5(jiti@2.7.0)(supports-color@7.2.0))
       '@eslint-community/regexpp': 4.12.2
-      '@eslint/config-array': 0.21.2
+      '@eslint/config-array': 0.21.2(supports-color@7.2.0)
       '@eslint/config-helpers': 0.4.2
       '@eslint/core': 0.17.0
-      '@eslint/eslintrc': 3.3.6
+      '@eslint/eslintrc': 3.3.6(supports-color@7.2.0)
       '@eslint/js': 9.39.5
       '@eslint/plugin-kit': 0.4.1
       '@humanfs/node': 0.16.8
@@ -2898,7 +2939,7 @@ snapshots:
       ajv: 6.15.0
       chalk: 4.1.2
       cross-spawn: 7.0.6
-      debug: 4.4.3
+      debug: 4.4.3(supports-color@7.2.0)
       escape-string-regexp: 4.0.0
       eslint-scope: 8.4.0
       eslint-visitor-keys: 4.2.1
@@ -2992,17 +3033,17 @@ snapshots:
   fsevents@2.3.3:
     optional: true
 
-  gaxios@7.3.1:
+  gaxios@7.3.1(supports-color@7.2.0):
     dependencies:
       extend: 3.0.2
-      https-proxy-agent: 7.0.6
+      https-proxy-agent: 7.0.6(supports-color@7.2.0)
       node-fetch: 3.3.2
     transitivePeerDependencies:
       - supports-color
 
-  gcp-metadata@8.1.2:
+  gcp-metadata@8.1.2(supports-color@7.2.0):
     dependencies:
-      gaxios: 7.3.1
+      gaxios: 7.3.1(supports-color@7.2.0)
       google-logging-utils: 1.2.0
       json-bigint: 1.0.0
     transitivePeerDependencies:
@@ -3018,12 +3059,12 @@ snapshots:
 
   globals@14.0.0: {}
 
-  google-auth-library@10.9.1:
+  google-auth-library@10.9.1(supports-color@7.2.0):
     dependencies:
       base64-js: 1.5.1
       ecdsa-sig-formatter: 1.0.11
-      gaxios: 7.3.1
-      gcp-metadata: 8.1.2
+      gaxios: 7.3.1(supports-color@7.2.0)
+      gcp-metadata: 8.1.2(supports-color@7.2.0)
       google-logging-utils: 1.1.3
       jws: 4.0.1
     transitivePeerDependencies:
@@ -3045,17 +3086,17 @@ snapshots:
     dependencies:
       lru-cache: 11.5.2
 
-  http-proxy-agent@7.0.2:
+  http-proxy-agent@7.0.2(supports-color@7.2.0):
     dependencies:
-      agent-base: 7.1.0
-      debug: 4.4.3
+      agent-base: 7.1.0(supports-color@7.2.0)
+      debug: 4.4.3(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
 
-  https-proxy-agent@7.0.6:
+  https-proxy-agent@7.0.6(supports-color@7.2.0):
     dependencies:
-      agent-base: 7.1.2
-      debug: 4.4.3
+      agent-base: 7.1.2(supports-color@7.2.0)
+      debug: 4.4.3(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
 
@@ -3180,6 +3221,8 @@ snapshots:
       data-uri-to-buffer: 4.0.0
       fetch-blob: 3.2.0
       formdata-polyfill: 4.0.10
+
+  nodemailer@7.0.13: {}
 
   on-exit-leak-free@2.1.2: {}
 
@@ -3473,10 +3516,10 @@ snapshots:
 
   util-deprecate@1.0.2: {}
 
-  vite-node@2.1.9(@types/node@22.20.1):
+  vite-node@2.1.9(@types/node@22.20.1)(supports-color@7.2.0):
     dependencies:
       cac: 6.7.14
-      debug: 4.4.3
+      debug: 4.4.3(supports-color@7.2.0)
       es-module-lexer: 1.7.0
       pathe: 1.1.2
       vite: 5.4.21(@types/node@22.20.1)
@@ -3500,7 +3543,7 @@ snapshots:
       '@types/node': 22.20.1
       fsevents: 2.3.3
 
-  vitest@2.1.9(@types/node@22.20.1):
+  vitest@2.1.9(@types/node@22.20.1)(supports-color@7.2.0):
     dependencies:
       '@vitest/expect': 2.1.9
       '@vitest/mocker': 2.1.9(vite@5.4.21(@types/node@22.20.1))
@@ -3510,7 +3553,7 @@ snapshots:
       '@vitest/spy': 2.1.9
       '@vitest/utils': 2.1.9
       chai: 5.3.3
-      debug: 4.4.3
+      debug: 4.4.3(supports-color@7.2.0)
       expect-type: 1.4.0
       magic-string: 0.30.21
       pathe: 1.1.2
@@ -3520,7 +3563,7 @@ snapshots:
       tinypool: 1.1.1
       tinyrainbow: 1.2.0
       vite: 5.4.21(@types/node@22.20.1)
-      vite-node: 2.1.9(@types/node@22.20.1)
+      vite-node: 2.1.9(@types/node@22.20.1)(supports-color@7.2.0)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 22.20.1

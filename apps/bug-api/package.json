@@ -22,6 +22,7 @@
     "@llmbugfix/repo-manager": "workspace:*",
     "@llmbugfix/shared": "workspace:*",
     "@llmbugfix/validator": "workspace:*",
-    "@llmbugfix/vision-provider": "workspace:*"
+    "@llmbugfix/vision-provider": "workspace:*",
+    "@llmbugfix/weekly-email-report": "workspace:*"
   }
 }

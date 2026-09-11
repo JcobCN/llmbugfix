@@ -3,18 +3,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { AttachmentService } from '@llmbugfix/attachment-service';
-import { openDatabase, SQLiteBugRepository } from '@llmbugfix/bug-repository';
+import { openDatabase, SQLiteBugRepository, SQLiteWeeklyReportDataSource, SQLiteWeeklyReportDeliveryRepository } from '@llmbugfix/bug-repository';
 import { EnvironmentResolver } from '@llmbugfix/environment-resolver';
 import { EnvironmentRunner } from '@llmbugfix/environment-runner';
 import { IntakeService, OpenAICompatibleDocumentReconciler, OpenAICompatibleIntakeModel } from '@llmbugfix/intake-agent';
 import { JobQueue } from '@llmbugfix/job-queue';
 import { PiAgentRunner } from '@llmbugfix/pi-runner';
 import { RepoManager } from '@llmbugfix/repo-manager';
-import { createLogger, parseConfig } from '@llmbugfix/shared';
+import { createLogger, parseConfig, parseWeeklyEmailConfig } from '@llmbugfix/shared';
 import { CommandRunner, Validator } from '@llmbugfix/validator';
 import { Orchestrator } from '@llmbugfix/orchestrator';
 import { resolveWebRoute } from '../../bug-web/src/index.js';
 import { BugApiServer } from './index.js';
+import { DefaultWeeklyReportService, NodemailerSMTPMailSender, WeeklyReportScheduler } from '@llmbugfix/weekly-email-report';
 
 function loadDotEnv(filename = '.env'): void {
   if (!fs.existsSync(filename)) return;
@@ -58,6 +59,7 @@ function loadIntakeInstructions(filename: string): string {
 
 loadDotEnv();
 const config = parseConfig();
+const weeklyEmailConfig = parseWeeklyEmailConfig();
 const db = openDatabase(config.DATABASE_PATH);
 const repo = new SQLiteBugRepository(db);
 const queue = new JobQueue(repo, path.join(config.DATA_ROOT, 'queue'), { autoAcquireLock: true });
@@ -142,10 +144,24 @@ if (llmEnabled) {
   }
 }
 const pageRenderer = (pathname: string) => resolveWebRoute(pathname);
-const api = new BugApiServer({ ...process.env, ...config, DRY_RUN: process.env.DRY_RUN ?? true }, { repo, intake, queue, attachments, environments: environments ?? environmentResolver, pageRenderer });
+const apiEnvironment = { ...process.env };
+delete apiEnvironment.WEEKLY_EMAIL_SMTP_URL;
+delete apiEnvironment.WEEKLY_EMAIL_USERNAME;
+delete apiEnvironment.WEEKLY_EMAIL_PASSWORD;
+delete apiEnvironment.WEEKLY_EMAIL_RECIPIENTS;
+const api = new BugApiServer({ ...apiEnvironment, ...config, DRY_RUN: process.env.DRY_RUN ?? true }, { repo, intake, queue, attachments, environments: environments ?? environmentResolver, pageRenderer });
+const weeklyScheduler = weeklyEmailConfig.enabled ? new WeeklyReportScheduler(
+  { now: () => new Date() },
+  new SQLiteWeeklyReportDeliveryRepository(db),
+  new DefaultWeeklyReportService(new SQLiteWeeklyReportDataSource(db)),
+  new NodemailerSMTPMailSender(weeklyEmailConfig.value),
+  { from: weeklyEmailConfig.value.username, to: weeklyEmailConfig.value.recipients, logger: createLogger('weekly-email') },
+) : undefined;
 const host = process.env.BUGFIX_LISTEN_HOST ?? '127.0.0.1';
 const port = await api.listen(portFromEnv(process.env.PORT), host);
 orchestrator?.start();
+if (weeklyScheduler) void weeklyScheduler.start();
+else console.log('每周邮件未启用');
 console.log(`LLM Bugfix local verification server is ready at http://${host}:${port}`);
 console.log(workerEnabled ? `Real Intake and Pi repair worker are enabled with model ${model}.` : llmEnabled ? `Real Intake is enabled with model ${model}; submitted reports stay in the local queue until PI_SANDBOX_PROFILE enables the externally isolated Pi worker.` : 'LLM and repair worker are disabled; submitted reports stay in the local queue. Configure LLM_ENDPOINT_URL and LLM_MODEL to enable Intake.');
 if (llmEnabled && !sandboxProfile) console.warn('WARNING: real Pi repair worker disabled; set PI_SANDBOX_PROFILE to an externally enforced sandbox profile before enabling Pi bash.');
@@ -155,9 +171,9 @@ const shutdown = async (signal: string): Promise<void> => {
   if (closing) return;
   closing = true;
   console.log(`Received ${signal}; closing local server.`);
-  const workerStopped = orchestrator?.stop();
+  await weeklyScheduler?.stop();
+  await orchestrator?.stop();
   await api.close();
-  await workerStopped;
   queue.close();
   db.close();
 };

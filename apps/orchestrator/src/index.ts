@@ -94,9 +94,11 @@ export class Orchestrator {
         this.writeArtifact(artifactDir, 'agent-result.json', fixResult);
       } else {
         fixerInFlight = true;
+        const fixerStartedAt = now();
         const result = await this.agentRunner.runFixer({ worktreePath, task, profile, safety: 'No network, push, merge, deploy, production access, or dependency downloads.', docs: resolved.markdown.map((x) => ({ path: x.path, content: x.content })), skills: resolved.skills.map((x) => ({ path: x.path, content: x.content })), attachments: attachments.map((x) => ({ id: x.id, text: x.extractedText ?? undefined, analysis: x.analysisResult ?? undefined })), signal: cancellation.signal });
         fixerInFlight = false;
         this.checkpoint(jobId, bugId); fixResult = AgentFixResultSchema.strict().parse(result); this.writeArtifact(artifactDir, 'agent-result.json', fixResult);
+        this.repo.createAgentRun({ bugId: bug.id, jobId, agentType: 'fixer', status: 'COMPLETED', sessionId: null, startedAt: fixerStartedAt, finishedAt: now(), input: { bugKey: bug.bugKey }, output: fixResult, error: null });
         const actualFiles = await this.repoManager.filesChanged(worktreePath);
         const actualDiff = await this.repoManager.diff(worktreePath);
         if (!actualDiff.trim() || !actualFiles.length) throw new Error('Fixer reported fixed but produced no diff');

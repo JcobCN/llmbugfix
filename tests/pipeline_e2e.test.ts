@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { openDatabase, SQLiteBugRepository } from '../packages/bug-repository/src/index.js';
+import { openDatabase, SQLiteBugRepository, SQLiteWeeklyReportDataSource } from '../packages/bug-repository/src/index.js';
 import { newId } from '../packages/shared/src/index.js';
 import { JobQueue } from '../packages/job-queue/src/index.js';
 import { EnvironmentResolver } from '../packages/environment-resolver/src/index.js';
@@ -11,6 +11,7 @@ import { EnvironmentRunner } from '../packages/environment-runner/src/index.js';
 import { FakePiRunner, PiAgentRunnerTimeoutError } from '../packages/pi-runner/src/index.js';
 import { Validator } from '../packages/validator/src/index.js';
 import { Orchestrator } from '../apps/orchestrator/src/index.js';
+import { DefaultWeeklyReportService } from '../packages/weekly-email-report/src/index.js';
 
 class FakeCommandRunner {
   calls: string[][] = [];
@@ -318,6 +319,15 @@ environments:
     const fixTask = JSON.parse(fs.readFileSync(path.join(artifactDir, 'fix-task.json'), 'utf8'));
     expect(fixTask.executionTarget).toBe('frontend');
     expect(fixTask.attachments.map((item: { id: string }) => item.id)).toContain(attachmentId);
+    const fixerRuns = db.prepare("SELECT output FROM agent_runs WHERE bug_id = ? AND agent_type = 'fixer' AND status = 'COMPLETED'").all(bug.id) as Array<{ output: string }>;
+    expect(fixerRuns).toHaveLength(1);
+    expect(JSON.parse(fixerRuns[0].output)).toMatchObject({ bugKey: bug.bugKey, summary: 'Fake fixer result' });
+    const weeklyReport = new DefaultWeeklyReportService(new SQLiteWeeklyReportDataSource(db)).generate(
+      new Date(Date.now() - 24 * 60 * 60_000).toISOString(),
+      new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
+    );
+    expect(weeklyReport.bugs).toHaveLength(1);
+    expect(weeklyReport.bugs[0]).toMatchObject({ bugKey: bug.bugKey, summary: 'Fake fixer result', currentStatus: 'FIX_READY' });
   });
 
   it('runs push-enabled pipeline and reaches READY_FOR_HUMAN_REVIEW', async () => {

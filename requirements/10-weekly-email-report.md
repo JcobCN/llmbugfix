@@ -23,7 +23,7 @@ smtps://mail.onecloud.cn:465
 - 统计区间是当周周一 00:00 至周六 09:00，区间为左闭右开 `[start, end)`。
 - 上周或更早提交的 Bug，只要本周统计区间内发生了修复流水线进展，也必须纳入。
 - 没有任何符合条件的 Bug 时仍发送邮件，正文明确显示“本周无 Bug 修复进展”。
-- 服务在计划时间停机或 SMTP 暂时失败时，恢复后必须补发最近一期未成功的周报。
+- 服务启动时仅检查最近一期已到期周报；该周期没有任何发送记录时才发送。每期最多进行一次真实 SMTP 尝试，失败或发送中断后不自动重试，下一周的新周报仍正常发送。
 
 ## 2. 范围与非目标
 
@@ -31,7 +31,7 @@ smtps://mail.onecloud.cn:465
 
 - 增加周报配置解析和启动校验。
 - 增加邮件发送 Adapter、周报查询/生成服务、可注入时钟和调度器。
-- 增加 SQLite 周报发送记录，用于互斥 claim、失败重试、停机补发和防止正常重启重复发送。
+- 增加 SQLite 周报发送记录，用于互斥 claim、一次性发送审计和防止正常重启重复发送。
 - 在本地服务 bootstrap 中接线调度器，并纳入 `SIGINT`/`SIGTERM` 优雅停止流程。
 
 ### 2.2 非目标
@@ -39,7 +39,7 @@ smtps://mail.onecloud.cn:465
 - 不增加网页邮箱配置页面、收件人管理或邮件历史页面。
 - 不从用户的 Bug 描述、附件或对话中读取邮箱凭据或收件人。
 - 不发送原始日志、错误栈、附件或 diff，不增加 LLM 生成邮件内容。
-- 不保证 SMTP 的严格“恰好一次”交付；本工作包提供的是“至少一次”交付语义。
+- SMTP 接受邮件后若应用未能确认结果，系统无法严格判断收件方是否已收到。为避免自动重复邮件，本工作包采用“每期最多一次真实 SMTP 尝试”的语义，可能需要人工核实这种歧义结果。
 
 ## 3. 配置契约
 
@@ -156,25 +156,26 @@ SQLite 增加 `weekly_report_deliveries` 表，至少包含：
 | `period_start` / `period_end` | 带 offset ISO 8601；`period_start` 必须有唯一约束。 |
 | `status` | `PENDING` / `SENDING` / `SENT` / `FAILED`。 |
 | `attempt_count` | 非负整数，每次真实发送前原子加一。 |
-| `message_id` | 由周期起点确定性生成并唯一，所有重试使用相同值。 |
+| `message_id` | 由周期起点确定性生成并唯一，用于该周期的一次性发送审计。 |
 | `report_snapshot` | 已校验的结构化周报 JSON，不包含凭据或原始敏感内容。 |
-| `next_attempt_at` | 下次可 claim 时间。 |
+| `next_attempt_at` | 兼容保留字段；一次性投递语义下始终为 `NULL`。 |
 | `last_error` | 脱敏、截断后的错误，成功后为 null。 |
 | `claimed_at` / `sent_at` / `created_at` / `updated_at` | 调度、恢复和审计时间。 |
 
 - 建表/迁移必须可重复执行，并保留现有数据。
-- 到达发送时间后，调度器以 `period_start` 唯一键创建或取得记录，在事务中将到期记录原子 claim 为 `SENDING`。
+- 到达发送时间后，调度器仅在 `period_start` 尚无记录时，在事务中创建快照并原子 claim 为 `SENDING`，`attempt_count` 固定为 1。
 - 成功后写入 `SENT` 和 `sent_at`。已是 `SENT` 的周期不得再次发送。
-- 失败后写入 `FAILED`、脱敏 `last_error` 和 `next_attempt_at`；使用 1 分钟、5 分钟、15 分钟、1 小时、6 小时的退避序列，后续失败继续每 6 小时重试，直至成功或服务停止。
-- 启动时恢复超过一个发送 timeout 仍为 `SENDING` 的记录为 `FAILED`，并立即尝试最近一期未 `SENT` 的到期周报。更早的遗漏周期不批量补发。
-- SMTP 在接受邮件后如果连接中断，应用无法判定对端是否已接收；因此重试可能产生重复邮件。该限制必须记录在 README/运维说明中。
+- 失败后写入 `FAILED` 和脱敏 `last_error`，`next_attempt_at` 保持 `NULL`。不安排退避、进程内重试或跨重启重试。
+- 任何既有记录（包括 `FAILED`、`SENDING`、`SENT` 和兼容保留的 `PENDING`）都不得再次 claim。进程中断遗留的 `SENDING` 是终态，不做过期恢复或重发。
+- 启动和计划唤醒只计算最近一期已到期周期；若该周期已有记录则不发送。旧周失败不会阻塞下一周创建并发送新的周期记录，更早的遗漏周期不批量补发。
+- SMTP 在接受邮件后如果连接中断，应用无法判定对端是否已接收；系统仍不重试，以减少自动重复邮件。该限制必须记录在 README/运维说明中。
 
 ## 8. 调度器生命周期
 
 - 邮件功能启用时，调度器与 API/修复 worker 处于同一本地服务进程，复用同一 SQLite 连接或受控数据库工厂。
-- 启动后立即检查补发，然后计算下一个 `Asia/Shanghai` 周六 09:00；不得依赖操作系统的 crontab。
+- 启动后立即检查最近一期已到期且从未记录的周期，然后计算下一个 `Asia/Shanghai` 周六 09:00；不得依赖操作系统的 crontab。
 - 调度等待应使用可取消 timer，不做忙轮询。系统时钟大幅跳变或长时间 suspend 后必须重新检查到期周期。
-- shutdown 顺序为停止新的周报 claim、取消当前 SMTP 发送、停止修复 worker、关闭 API，最后释放 queue 和数据库资源。已 claim 但未成功的周报由下次启动恢复。
+- shutdown 顺序为停止新的周报 claim、取消当前 SMTP 发送并将其记为 `FAILED`、停止修复 worker、关闭 API，最后释放 queue 和数据库资源。进程异常退出遗留的 `SENDING` 记录保留用于审计，下次启动同样不得重发。
 - 周报失败不得导致 API 或 Bug 修复 worker 退出；运行时失败通过脱敏日志和持久化发送状态暴露。
 
 ## 9. 测试与验收
@@ -192,12 +193,13 @@ SQLite 增加 `weekly_report_deliveries` 表，至少包含：
 - [ ] 上周提交但本周有流水线事件的 Bug 被纳入；只更新 `bug_reports.updated_at` 不会被纳入。
 - [ ] 同一 Bug 多个事件只显示一次，最近进展时间正确，所有当前状态均映射到唯一分类。
 
-### 9.3 发送、重试与恢复
+### 9.3 发送、去重与中断
 
 - [ ] 单元和集成测试使用 fake `MailSender`，不连接真实 SMTP。
 - [ ] 验证 SMTPS URL、认证参数、TLS 开关、收件人、UTF-8 alternative 和稳定 Message-ID 被正确传给 Adapter。
-- [ ] 失败进入指定退避，进程内重试与重启补发复用同一快照和 Message-ID。
-- [ ] `period_start` 唯一约束、原子 claim、过期 `SENDING` 恢复和 `SENT` 不重发在 SQLite 集成测试中被覆盖。
+- [ ] 首次失败写入 `FAILED`、脱敏错误和 `next_attempt_at=NULL`；同周期在进程内或重启后都不再发送。
+- [ ] `period_start` 唯一约束、原子 claim、`FAILED`/中断 `SENDING`/`SENT` 不重发在 SQLite 集成测试中被覆盖。
+- [ ] 旧周失败不阻塞下一周的新周报发送。
 - [ ] SMTP 超时、认证失败、证书失败和取消的错误均被脱敏，且不会使 API/修复 worker 退出。
 
 ### 9.4 执行环境
@@ -212,4 +214,4 @@ SQLite 增加 `weekly_report_deliveries` 表，至少包含：
 - `packages/bug-repository` 管理 `weekly_report_deliveries` 表、迁移和发送记录 repository，周报 package 不自行打开第二个业务数据库。
 - `packages/shared` 管理邮件配置 schema 和 secret redaction，现有邮件之外的配置语义保持不变。
 - `apps/bug-api/src/local-server.ts` 只负责解析配置、构建依赖和管理生命周期，不在 bootstrap 中实现报表 SQL、模板或 SMTP 协议。
-- README 必须记录配置方法、时区/统计边界、停机补发、至少一次语义、故障排查和人工 SMTP 验收方法。
+- README 必须记录配置方法、时区/统计边界、每期最多一次尝试且不自动重试、旧周失败不阻塞新周、故障排查和人工 SMTP 验收方法。

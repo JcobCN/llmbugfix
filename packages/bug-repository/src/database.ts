@@ -12,9 +12,28 @@ CREATE TABLE IF NOT EXISTS bug_attachments (id TEXT PRIMARY KEY, bug_id TEXT NOT
 CREATE TABLE IF NOT EXISTS bug_events (id TEXT PRIMARY KEY, bug_id TEXT NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE, from_status TEXT, to_status TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, bug_id TEXT NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE, status TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0, attempt INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, heartbeat_at TEXT, error TEXT);
 CREATE TABLE IF NOT EXISTS agent_runs (id TEXT PRIMARY KEY, bug_id TEXT NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE, job_id TEXT REFERENCES jobs(id), agent_type TEXT NOT NULL, status TEXT NOT NULL, session_id TEXT, started_at TEXT NOT NULL, finished_at TEXT, input TEXT NOT NULL, output TEXT, error TEXT);
+CREATE TABLE IF NOT EXISTS weekly_report_deliveries (
+  id TEXT PRIMARY KEY,
+  period_start TEXT NOT NULL UNIQUE,
+  period_end TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('PENDING', 'SENDING', 'SENT', 'FAILED')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  message_id TEXT NOT NULL UNIQUE,
+  report_snapshot TEXT NOT NULL,
+  next_attempt_at TEXT,
+  last_error TEXT,
+  claimed_at TEXT,
+  sent_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS bug_key_sequence (id INTEGER PRIMARY KEY CHECK (id = 1), next_value INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS jobs_queue_idx ON jobs(status, priority ASC, created_at);
 CREATE INDEX IF NOT EXISTS messages_conversation_idx ON conversation_messages(conversation_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS weekly_report_deliveries_period_start_uidx ON weekly_report_deliveries(period_start);
+CREATE UNIQUE INDEX IF NOT EXISTS weekly_report_deliveries_message_id_uidx ON weekly_report_deliveries(message_id);
+CREATE INDEX IF NOT EXISTS weekly_report_deliveries_due_idx ON weekly_report_deliveries(status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS bug_events_weekly_progress_idx ON bug_events(created_at, to_status, bug_id);
 `;
 
 export type SqliteDatabase = BetterSqliteDatabase;

@@ -20,6 +20,7 @@ export default defineConfig({
       '@llmbugfix/environment-runner': path.resolve(__dirname, 'packages/environment-runner/src/index.ts'),
       '@llmbugfix/pi-runner': path.resolve(__dirname, 'packages/pi-runner/src/index.ts'),
       '@llmbugfix/validator': path.resolve(__dirname, 'packages/validator/src/index.ts'),
+      '@llmbugfix/weekly-email-report': path.resolve(__dirname, 'packages/weekly-email-report/src/index.ts'),
       '@bug-agent/shared': path.resolve(__dirname, 'packages/shared/src/index.ts'),
       '@bug-agent/bug-domain': path.resolve(__dirname, 'packages/bug-domain/src/index.ts'),
       '@bug-agent/bug-repository': path.resolve(__dirname, 'packages/bug-repository/src/index.ts'),
@@ -33,6 +34,7 @@ export default defineConfig({
       '@bug-agent/environment-runner': path.resolve(__dirname, 'packages/environment-runner/src/index.ts'),
       '@bug-agent/pi-runner': path.resolve(__dirname, 'packages/pi-runner/src/index.ts'),
       '@bug-agent/validator': path.resolve(__dirname, 'packages/validator/src/index.ts'),
+      '@bug-agent/weekly-email-report': path.resolve(__dirname, 'packages/weekly-email-report/src/index.ts'),
     }
   }
 });

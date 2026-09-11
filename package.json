@@ -9,13 +9,14 @@
     "start": "pnpm build && node dist/local-server.mjs",
     "typecheck": "tsc --noEmit",
     "test": "pnpm typecheck && vitest run",
-    "lint": "eslint packages/*/src",
+    "lint": "eslint packages/*/src apps/*/src",
     "build": "pnpm typecheck && node scripts/build.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.4",
     "better-sqlite3": "^11.10.0",
     "drizzle-orm": "^0.38.4",
+    "nodemailer": "^7.0.6",
     "pino": "^9.14.0",
     "yaml": "^2.9.0",
     "zod": "^3.25.76"

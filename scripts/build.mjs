@@ -21,6 +21,7 @@ await build({
     '@earendil-works/pi-coding-agent',
     'better-sqlite3',
     'drizzle-orm',
+    'nodemailer',
     'pino',
     'yaml',
     'zod',

@@ -1,5 +1,5 @@
 {
-  "name": "@llmbugfix/bug-repository",
+  "name": "@llmbugfix/weekly-email-report",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,9 +11,10 @@
   "dependencies": {
     "@llmbugfix/bug-domain": "workspace:*",
     "@llmbugfix/shared": "workspace:*",
-    "@llmbugfix/weekly-email-report": "workspace:*",
-    "better-sqlite3": "^11.7.0",
-    "drizzle-orm": "^0.38.3",
-    "zod": "^3.24.1"
+    "nodemailer": "^7.0.6",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "^7.0.1"
   }
 }
