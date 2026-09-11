@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { NodemailerSMTPMailSender, SMTPDeliveryError, type MailMessage } from './index.js';
 
-const config = { smtpUrl: 'smtps://mail.onecloud.cn:465' as const, username: 'sender@example.com', password: 'dummy-password', recipients: ['owner@example.com'] };
+const config = { smtpUrl: 'smtps://mail.onecloud.cn:465' as const, username: 'sender@example.com', password: 'dummy-password', recipients: ['owner@example.com'], allowInsecureTls: false };
 const message: MailMessage = {
   from: config.username, to: config.recipients, subject: '周报', text: '纯文本', html: '<p>纯文本</p>', messageId: '<stable@example.com>',
 };
@@ -15,12 +15,21 @@ describe('nodemailer SMTP adapter', () => {
       return { sendMail: async (mail) => { mailOptions = mail; }, close: vi.fn() };
     } });
     await sender.send(message);
-    expect(transportOptions).toMatchObject({ host: 'mail.onecloud.cn', port: 465, secure: true, auth: { user: config.username, pass: config.password } });
-    expect(transportOptions).not.toHaveProperty('tls.rejectUnauthorized', false);
+    expect(transportOptions).toMatchObject({ host: 'mail.onecloud.cn', port: 465, secure: true, tls: { rejectUnauthorized: true }, auth: { user: config.username, pass: config.password }, authMethod: 'LOGIN' });
     expect(mailOptions).toMatchObject({
       from: config.username, to: config.recipients, envelope: { from: config.username, to: config.recipients },
       subject: message.subject, text: message.text, html: message.html, messageId: message.messageId,
     });
+  });
+
+  it('only disables certificate and hostname verification when explicitly enabled', async () => {
+    let transportOptions: Record<string, unknown> | undefined;
+    const sender = new NodemailerSMTPMailSender({ ...config, allowInsecureTls: true }, { transportFactory: (options) => {
+      transportOptions = options as unknown as Record<string, unknown>;
+      return { sendMail: async () => {}, close: vi.fn() };
+    } });
+    await sender.send(message);
+    expect(transportOptions).toMatchObject({ secure: true, tls: { rejectUnauthorized: false } });
   });
 
   it('maps raw authentication failures to a bounded credential-free diagnostic', async () => {

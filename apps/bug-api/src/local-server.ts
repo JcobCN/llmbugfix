@@ -149,6 +149,7 @@ delete apiEnvironment.WEEKLY_EMAIL_SMTP_URL;
 delete apiEnvironment.WEEKLY_EMAIL_USERNAME;
 delete apiEnvironment.WEEKLY_EMAIL_PASSWORD;
 delete apiEnvironment.WEEKLY_EMAIL_RECIPIENTS;
+delete apiEnvironment.WEEKLY_EMAIL_ALLOW_INSECURE_TLS;
 const api = new BugApiServer({ ...apiEnvironment, ...config, DRY_RUN: process.env.DRY_RUN ?? true }, { repo, intake, queue, attachments, environments: environments ?? environmentResolver, pageRenderer });
 const weeklyScheduler = weeklyEmailConfig.enabled ? new WeeklyReportScheduler(
   { now: () => new Date() },
@@ -162,6 +163,7 @@ const port = await api.listen(portFromEnv(process.env.PORT), host);
 orchestrator?.start();
 if (weeklyScheduler) void weeklyScheduler.start();
 else console.log('每周邮件未启用');
+if (weeklyEmailConfig.enabled && weeklyEmailConfig.value.allowInsecureTls) console.warn('WARNING: weekly email TLS certificate and hostname verification are disabled; use only on an isolated internal SMTP network.');
 console.log(`LLM Bugfix local verification server is ready at http://${host}:${port}`);
 console.log(workerEnabled ? `Real Intake and Pi repair worker are enabled with model ${model}.` : llmEnabled ? `Real Intake is enabled with model ${model}; submitted reports stay in the local queue until PI_SANDBOX_PROFILE enables the externally isolated Pi worker.` : 'LLM and repair worker are disabled; submitted reports stay in the local queue. Configure LLM_ENDPOINT_URL and LLM_MODEL to enable Intake.');
 if (llmEnabled && !sandboxProfile) console.warn('WARNING: real Pi repair worker disabled; set PI_SANDBOX_PROFILE to an externally enforced sandbox profile before enabling Pi bash.');

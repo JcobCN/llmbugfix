@@ -110,7 +110,7 @@ export interface RenderedWeeklyReport { readonly subject: string; readonly text:
 
 export function renderWeeklyReport(value: WeeklyBugReport): RenderedWeeklyReport {
   const report = WeeklyBugReportSchema.parse(value);
-  const period = `${shanghaiDateTime(report.periodStart)} ~ ${shanghaiDateTime(report.periodEnd)}（Asia/Shanghai，左闭右开）`;
+  const period = `${shanghaiDateTime(report.periodStart)} ~ ${shanghaiDateTime(report.periodEnd)}（Asia/Shanghai）`;
   const text: string[] = [
     'LLMBugFix Bug 修复周报',
     `统计区间：${period}`,

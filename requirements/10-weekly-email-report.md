@@ -50,6 +50,7 @@ WEEKLY_EMAIL_SMTP_URL=smtps://mail.onecloud.cn:465
 WEEKLY_EMAIL_USERNAME=sender@example.com
 WEEKLY_EMAIL_PASSWORD=secret
 WEEKLY_EMAIL_RECIPIENTS=owner@example.com,team@example.com
+WEEKLY_EMAIL_ALLOW_INSECURE_TLS=false
 ```
 
 | 配置 | 要求 |
@@ -58,13 +59,14 @@ WEEKLY_EMAIL_RECIPIENTS=owner@example.com,team@example.com
 | `WEEKLY_EMAIL_USERNAME` | 必填且必须是合法邮箱地址；同时用作 SMTP 登录账号、信封发件人和 `From` 地址。 |
 | `WEEKLY_EMAIL_PASSWORD` | 必填的 SMTP 密码。不得出现在日志、错误响应、数据库、artifact、邮件正文或测试快照中。 |
 | `WEEKLY_EMAIL_RECIPIENTS` | 必填；逗号分隔的一个或多个邮箱地址。解析时 trim、拒绝空项、按不区分大小写去重并对每项做邮箱校验。 |
+| `WEEKLY_EMAIL_ALLOW_INSECURE_TLS` | 可选，默认 `false`，仅接受精确值 `true`/`false`。设为 `true` 时关闭 SMTP 证书和主机名校验，只允许隔离内网人工验收，启动必须输出明显警告，禁止用于生产。 |
 
-`WEEKLY_EMAIL_USERNAME`、`WEEKLY_EMAIL_PASSWORD` 和 `WEEKLY_EMAIL_RECIPIENTS` 全部未配置时，周报功能禁用，启动日志必须明确说明“每周邮件未启用”。`WEEKLY_EMAIL_SMTP_URL` 的默认值不单独触发启用。三个启用配置只提供了一部分、任一值为空、收件人无效或 SMTP URL 非法时，应快速启动失败，不得静默禁用或降级。
+`WEEKLY_EMAIL_USERNAME`、`WEEKLY_EMAIL_PASSWORD` 和 `WEEKLY_EMAIL_RECIPIENTS` 全部未配置时，周报功能禁用，启动日志必须明确说明“每周邮件未启用”。`WEEKLY_EMAIL_SMTP_URL` 和 `WEEKLY_EMAIL_ALLOW_INSECURE_TLS` 单独配置不触发启用。三个启用配置只提供了一部分、任一值为空、收件人无效、SMTP URL 非法或 TLS 开关不是精确布尔值时，应快速启动失败，不得静默禁用或降级。
 
 ### 3.2 SMTP 安全与超时
 
 - 生产 Adapter 使用 Node.js 生态成熟的 SMTP 库，通过 lockfile 锁定实际依赖版本；不手写 SMTP 协议状态机。
-- 465 端口必须从建连开始使用 TLS，开启服务器证书和主机名验证，禁止 `rejectUnauthorized: false` 或其他绕过证书验证的设置。
+- 465 端口必须从建连开始使用 TLS，默认开启服务器证书和主机名验证。仅当显式设置 `WEEKLY_EMAIL_ALLOW_INSECURE_TLS=true` 时，才允许对隔离内网人工验收设置 `rejectUnauthorized: false`；该模式必须输出明显警告，不能作为生产默认或通过全局 `NODE_TLS_REJECT_UNAUTHORIZED=0` 开启。
 - 连接、认证和发送必须有有界 timeout；超时和 SMTP 错误必须转换为不含凭据、收件人全量地址或服务器原始响应的可诊断错误。
 - SMTP 库只能在邮件 Adapter 包内使用；周报服务和调度器仅依赖 `MailSender` 接口。
 
@@ -197,6 +199,7 @@ SQLite 增加 `weekly_report_deliveries` 表，至少包含：
 
 - [ ] 单元和集成测试使用 fake `MailSender`，不连接真实 SMTP。
 - [ ] 验证 SMTPS URL、认证参数、TLS 开关、收件人、UTF-8 alternative 和稳定 Message-ID 被正确传给 Adapter。
+- [ ] 默认启用 TLS 证书/主机名校验；仅显式配置 `WEEKLY_EMAIL_ALLOW_INSECURE_TLS=true` 时传递 `rejectUnauthorized: false`，并输出启动警告。
 - [ ] 首次失败写入 `FAILED`、脱敏错误和 `next_attempt_at=NULL`；同周期在进程内或重启后都不再发送。
 - [ ] `period_start` 唯一约束、原子 claim、`FAILED`/中断 `SENDING`/`SENT` 不重发在 SQLite 集成测试中被覆盖。
 - [ ] 旧周失败不阻塞下一周的新周报发送。

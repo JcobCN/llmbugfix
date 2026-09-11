@@ -31,7 +31,15 @@ describe('weekly email configuration', () => {
       username: 'sender@example.com',
       password: ' secret ',
       recipients: ['Team@example.com', 'owner@example.com'],
+      allowInsecureTls: false,
     } });
+  });
+
+  it('requires an explicit boolean for the internal-only insecure TLS override', () => {
+    const base = { WEEKLY_EMAIL_USERNAME: 'sender@example.com', WEEKLY_EMAIL_PASSWORD: 'secret', WEEKLY_EMAIL_RECIPIENTS: 'owner@example.com' };
+    expect(parseWeeklyEmailConfig({ ...base, WEEKLY_EMAIL_ALLOW_INSECURE_TLS: 'true' })).toMatchObject({ enabled: true, value: { allowInsecureTls: true } });
+    expect(parseWeeklyEmailConfig({ ...base, WEEKLY_EMAIL_ALLOW_INSECURE_TLS: 'false' })).toMatchObject({ enabled: true, value: { allowInsecureTls: false } });
+    expect(() => parseWeeklyEmailConfig({ ...base, WEEKLY_EMAIL_ALLOW_INSECURE_TLS: '1' })).toThrow('WEEKLY_EMAIL_ALLOW_INSECURE_TLS must be exactly true or false');
   });
 
   it('redacts email addresses, secrets and bounds persisted diagnostics', () => {

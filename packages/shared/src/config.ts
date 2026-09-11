@@ -9,12 +9,19 @@ export const WeeklyEmailConfigSchema = z.object({
   username: emailAddressSchema,
   password: z.string().min(1),
   recipients: z.array(emailAddressSchema).min(1),
+  allowInsecureTls: z.boolean(),
 }).strict();
 export type WeeklyEmailConfig = z.infer<typeof WeeklyEmailConfigSchema>;
 
 export type WeeklyEmailConfiguration =
   | { readonly enabled: false }
   | { readonly enabled: true; readonly value: WeeklyEmailConfig };
+
+function parseBooleanFlag(raw: string | undefined, name: string): boolean {
+  if (raw === undefined || raw === 'false') return false;
+  if (raw === 'true') return true;
+  throw new Error(`${name} must be exactly true or false`);
+}
 
 /**
  * The SMTP URL alone never enables weekly mail.  Once any of the three
@@ -26,6 +33,7 @@ export function parseWeeklyEmailConfig(env: Record<string, string | undefined> =
   if (smtpUrl !== WEEKLY_EMAIL_SMTP_URL) {
     throw new Error(`WEEKLY_EMAIL_SMTP_URL must be exactly ${WEEKLY_EMAIL_SMTP_URL}`);
   }
+  const allowInsecureTls = parseBooleanFlag(env.WEEKLY_EMAIL_ALLOW_INSECURE_TLS, 'WEEKLY_EMAIL_ALLOW_INSECURE_TLS');
 
   const rawUsername = env.WEEKLY_EMAIL_USERNAME;
   const rawPassword = env.WEEKLY_EMAIL_PASSWORD;
@@ -58,7 +66,7 @@ export function parseWeeklyEmailConfig(env: Record<string, string | undefined> =
   if (!parsedUsername.success) throw new Error('WEEKLY_EMAIL_USERNAME must be a valid email address');
   return {
     enabled: true,
-    value: WeeklyEmailConfigSchema.parse({ smtpUrl, username: parsedUsername.data, password: rawPassword, recipients }),
+    value: WeeklyEmailConfigSchema.parse({ smtpUrl, username: parsedUsername.data, password: rawPassword, recipients, allowInsecureTls }),
   };
 }
 

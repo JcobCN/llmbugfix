@@ -42,6 +42,8 @@ describe('weekly report generation', () => {
     expect(rendered.html).toContain('&lt;blocked &amp; reason&gt;');
     expect(rendered.html).not.toContain('unvalidated secret');
     expect(rendered.text).toContain('<blocked & reason>');
+    expect(rendered.text).not.toContain('左闭右开');
+    expect(rendered.html).not.toContain('左闭右开');
   });
 
   it('fails closed with a contract error for unmapped or invalid current status and renders an explicit empty week', () => {
