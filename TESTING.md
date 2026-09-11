@@ -160,3 +160,13 @@ curl --fail http://127.0.0.1:18033/dashboard
 - 远端验证：`refs/heads/ai/BUG-000004-module-tab` 已推送，commit `7bf953f`，message `fix(BUG-000004): 点击 module 分类 tab 切换无反应`；
 - `git-result.json`：`pushed: true`，`review.json`：`verdict: approve`；
 - 修复了 `Title.ose`（声明+绑定 id）和 `CatalogAnchor.ose`（滚动容器健壮性）。
+
+## 2026-09-11 已执行记录（build 重构 + git remote 门禁回归）
+
+提交 `3d39da8` 将产物统一到根 `dist/`、`af1a78e` 抽出静态页面到 `public/`、`5a3b300` 要求提交前必须有 Git remote。按 `docs/sample-faq.md` 问答内容走了一遍：
+
+- `pnpm test`：18 个测试文件、153 项测试全部通过；`pnpm build` 通过，产物为根 `dist/local-server.mjs` + `dist/public/`；
+- 生产 bundle（空 LLM + 独立数据库 + `DRY_RUN`）`/api/health/ready` 返回 `ready`，`/` 与 `/dashboard` 均 200；完整 API 链路（创建会话 → 编辑草稿 → 提交 → 查询 → 取消）通过；
+- Web E2E（`pnpm dev -- --host`，真实 Intake）：按 sample-faq 三轮对话，`score 42 → 65`，`readyForConfirmation: true`，`document.syncStatus: synced`，repoUrl 正确提取进 `environmentProfile`；
+- 新门禁验证：带 `repositoryUrl` 提交 → `BUG-000006` 入队 `QUEUED`；不带 remote 提交 → `422 code=GIT_REPOSITORY_REQUIRED`（`必须提供项目的 Git 仓库远程地址后才能提交 Bug`）；
+- Dashboard `/api/bugs` 正常返回 6 条 Bug 列表，`/api/bugs/<KEY>` 与 `/progress` 正常。
