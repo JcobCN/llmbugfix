@@ -46,4 +46,21 @@ describe('SQLite repository', () => {
     expect(() => repo.changeBugStatus(first.bugKey, 'FIXING')).toThrow();
     db.close();
   });
+
+  it('persists bounded, redacted worker events with a bug-scoped cursor', () => {
+    const db = openDatabase();
+    const repo = new SQLiteBugRepository(db);
+    const user = repo.createUser({ displayName: 'Tester', email: null });
+    const conversationId = newId();
+    repo.createConversation({ id: conversationId, reporterId: user.id, status: 'submitted', draft: {}, completeness: { score: 70, dimensions: { problem: 20, reproduction: 20, environment: 10, evidence: 10, impact: 10 }, missingCriticalInformation: [], recommendedQuestions: [], readyForSubmission: true } });
+    const bug = repo.createBug(report(user.id, conversationId));
+    const job = repo.enqueueJob(bug.id);
+    const first = repo.appendWorkerEvent({ bugId: bug.id, jobId: job.id, role: 'fixer', eventType: 'tool_execution_start', tool: 'bash', summary: 'token=secret-value pnpm test' });
+    const second = repo.appendWorkerEvent({ bugId: bug.id, jobId: job.id, role: 'fixer', eventType: 'tool_execution_end', tool: 'bash', isError: true, summary: 'finished' });
+    expect(first.sequence).toBe(1);
+    expect(second.sequence).toBe(2);
+    expect(first.summary).toContain('[REDACTED]');
+    expect(repo.listWorkerEvents(bug.bugKey, { after: 1, limit: 10 })).toMatchObject([{ sequence: 2, isError: true }]);
+    db.close();
+  });
 });

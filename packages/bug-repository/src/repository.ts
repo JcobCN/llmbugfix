@@ -1,11 +1,25 @@
 import { AgentRunSchema, BugConversationSchema, BugReportDraftSchema, BugReportSchema, BugStatusSchema, ConversationMessageSchema, CompletenessEvaluationSchema, JobSchema, JobStatusSchema, AttachmentRefSchema, assertValidTransition, type AgentRun, type BugConversation, type BugReport, type ConversationMessage, type Job, type AttachmentRef, type BugStatus, type JobStatus, UserSchema, type User } from '@llmbugfix/bug-domain';
-import { NotFoundError, newId, now, bugKey } from '@llmbugfix/shared';
+import { NotFoundError, newId, now, bugKey, sanitizeDiagnostic } from '@llmbugfix/shared';
 import type { SqliteDatabase } from './database.js';
 
 const json = (value: unknown): string => JSON.stringify(value);
 const parseJson = <T>(value: unknown, parser: { parse: (value: unknown) => T }): T => parser.parse(typeof value === 'string' ? JSON.parse(value) : value);
 type UserInput = Omit<User, 'id' | 'createdAt' | 'updatedAt'> & Partial<Pick<User, 'id' | 'createdAt' | 'updatedAt'>>;
 type BugInput = Omit<BugReport, 'id' | 'bugKey' | 'createdAt' | 'updatedAt'> & Partial<Pick<BugReport, 'id' | 'bugKey' | 'createdAt' | 'updatedAt'>>;
+export type WorkerEventInput = {
+  bugId: string;
+  jobId: string;
+  role: string;
+  eventType: string;
+  tool?: string | null;
+  isError?: boolean;
+  turnIndex?: number | null;
+  toolCallCount?: number | null;
+  summary: string;
+  occurredAt?: string;
+};
+export type WorkerEvent = WorkerEventInput & { id: string; sequence: number; occurredAt: string; tool: string | null; isError: boolean; turnIndex: number | null; toolCallCount: number | null };
+export type WorkerEventQuery = { after?: number; before?: number; limit?: number };
 
 export interface BugRepository {
   createUser(input: UserInput): User;
@@ -25,6 +39,8 @@ export interface BugRepository {
   claimNextJob(): Job | null;
   updateJob(id: string, patch: Partial<Pick<Job, 'status' | 'error' | 'heartbeatAt' | 'finishedAt'>>): Job;
   createAgentRun(input: Omit<AgentRun, 'id'> & Partial<Pick<AgentRun, 'id'>>): AgentRun;
+  appendWorkerEvent(input: WorkerEventInput): WorkerEvent;
+  listWorkerEvents(bugIdOrKey: string, query?: WorkerEventQuery): WorkerEvent[];
 }
 
 export class SQLiteBugRepository implements BugRepository {
@@ -111,4 +127,36 @@ export class SQLiteBugRepository implements BugRepository {
   claimNextJob(): Job | null { const tx = this.database.transaction(() => { if (Number((this.database.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status = 'RUNNING'").get() as { count: number }).count) > 0) return null; const row = this.database.prepare("SELECT * FROM jobs WHERE status = 'QUEUED' ORDER BY priority ASC, created_at ASC LIMIT 1").get() as Record<string, unknown> | undefined; if (!row) return null; const startedAt = now(); const updated = this.database.prepare("UPDATE jobs SET status = 'RUNNING', attempt = attempt + 1, started_at = ?, heartbeat_at = ? WHERE id = ? AND status = 'QUEUED'").run(startedAt, startedAt, row.id); if (updated.changes !== 1) return null; return JobSchema.parse({ id: row.id, bugId: row.bug_id, status: 'RUNNING', priority: row.priority, attempt: Number(row.attempt) + 1, createdAt: row.created_at, startedAt, finishedAt: null, heartbeatAt: startedAt, error: null }); }); return tx(); }
   updateJob(id: string, patch: Partial<Pick<Job, 'status' | 'error' | 'heartbeatAt' | 'finishedAt'>>): Job { const row = this.database.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as Record<string, unknown> | undefined; if (!row) throw new NotFoundError('Job', id); const status = patch.status ?? row.status; JobStatusSchema.parse(status); const error = patch.error === undefined ? row.error : patch.error; const heartbeat = patch.heartbeatAt === undefined ? row.heartbeat_at : patch.heartbeatAt; const finished = patch.finishedAt === undefined ? row.finished_at : patch.finishedAt; this.database.prepare('UPDATE jobs SET status = ?, error = ?, heartbeat_at = ?, finished_at = ? WHERE id = ?').run(status, error, heartbeat, finished, id); return JobSchema.parse({ id: row.id, bugId: row.bug_id, status, priority: row.priority, attempt: row.attempt, createdAt: row.created_at, startedAt: row.started_at, finishedAt: finished, heartbeatAt: heartbeat, error }); }
   createAgentRun(input: Omit<AgentRun, 'id'> & Partial<Pick<AgentRun, 'id'>>): AgentRun { const value = AgentRunSchema.parse({ ...input, id: input.id ?? newId() }); this.database.prepare('INSERT INTO agent_runs (id, bug_id, job_id, agent_type, status, session_id, started_at, finished_at, input, output, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(value.id, value.bugId, value.jobId, value.agentType, value.status, value.sessionId, value.startedAt, value.finishedAt, json(value.input), value.output === null ? null : json(value.output), value.error); return value; }
+  appendWorkerEvent(input: WorkerEventInput): WorkerEvent {
+    const bugId = this.bugId(input.bugId);
+    const job = this.database.prepare('SELECT bug_id FROM jobs WHERE id = ?').get(input.jobId) as { bug_id?: string } | undefined;
+    if (!job || job.bug_id !== bugId) throw new NotFoundError('Job', input.jobId);
+    const role = sanitizeDiagnostic(input.role, 32);
+    const eventType = sanitizeDiagnostic(input.eventType, 64);
+    const tool = input.tool == null ? null : sanitizeDiagnostic(input.tool, 128);
+    const summary = sanitizeDiagnostic(input.summary, 1024);
+    const occurredAt = input.occurredAt ?? now();
+    const value = this.database.transaction(() => {
+      const current = this.database.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM worker_events WHERE bug_id = ?').get(bugId) as { sequence: number };
+      const sequence = Number(current.sequence) + 1;
+      const id = newId();
+      this.database.prepare('INSERT INTO worker_events (id, bug_id, job_id, sequence, occurred_at, role, event_type, tool, is_error, turn_index, tool_call_count, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, bugId, input.jobId, sequence, occurredAt, role, eventType, tool, input.isError ? 1 : 0, input.turnIndex ?? null, input.toolCallCount ?? null, summary);
+      // Keep each job bounded. The bug-wide sequence remains monotonic, so
+      // clients can safely poll across retries while old rows are reclaimed.
+      this.database.prepare('DELETE FROM worker_events WHERE job_id = ? AND sequence NOT IN (SELECT sequence FROM worker_events WHERE job_id = ? ORDER BY sequence DESC LIMIT 1000)').run(input.jobId, input.jobId);
+      return { id, bugId, jobId: input.jobId, sequence, occurredAt, role, eventType, tool, isError: Boolean(input.isError), turnIndex: input.turnIndex ?? null, toolCallCount: input.toolCallCount ?? null, summary };
+    })();
+    return value;
+  }
+  listWorkerEvents(bugIdOrKey: string, query: WorkerEventQuery = {}): WorkerEvent[] {
+    const bugId = this.bugId(bugIdOrKey);
+    const limit = query.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('limit must be an integer between 1 and 100');
+    if (query.after !== undefined && query.before !== undefined) throw new Error('after and before cannot be used together');
+    const cursor = query.before ?? query.after ?? 0;
+    const before = query.before !== undefined;
+    const rows = this.database.prepare(`SELECT * FROM worker_events WHERE bug_id = ? AND sequence ${before ? '<' : '>'} ? ORDER BY sequence ${before ? 'DESC' : 'ASC'} LIMIT ?`).all(bugId, cursor, limit) as Record<string, unknown>[];
+    if (before) rows.reverse();
+    return rows.map((row) => ({ id: String(row.id), bugId: String(row.bug_id), jobId: String(row.job_id), sequence: Number(row.sequence), occurredAt: String(row.occurred_at), role: String(row.role), eventType: String(row.event_type), tool: row.tool == null ? null : String(row.tool), isError: Boolean(row.is_error), turnIndex: row.turn_index == null ? null : Number(row.turn_index), toolCallCount: row.tool_call_count == null ? null : Number(row.tool_call_count), summary: String(row.summary) }));
+  }
 }

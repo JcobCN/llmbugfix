@@ -11,6 +11,21 @@ import { createLogger, safeLogContext } from '@llmbugfix/shared';
 import { createAttachmentRoutes } from './attachment-routes.js';
 
 type QueueJobLike = { id: string; bugId: string; status: string; attempt?: number; error?: string | null; startedAt?: string | null; finishedAt?: string | null; heartbeatAt?: string | null; workerId?: string | null };
+/** Public, deliberately bounded worker-log event shape.  The repository owns
+ * persistence; the API keeps this type permissive so older workers can be
+ * upgraded independently of the web process. */
+type WorkerEventLike = {
+  sequence: number;
+  occurredAt: string;
+  role: string;
+  eventType: string;
+  tool: string | null;
+  isError: boolean;
+  turnIndex: number | null;
+  toolCallCount: number | null;
+  summary: string;
+  jobId?: string | null;
+};
 export type QueueLike = {
   enqueueJob(bugId: string, bugKey?: string, priority?: number): unknown;
   listJobs?: () => QueueJobLike[];
@@ -189,13 +204,13 @@ export class BugApiServer {
         send(response, 201, conversationResponse(this.repo, conversation, this.readDocument(conversation.id))); return;
       }
       if (conversationMatch) { await this.handleConversation(conversationMatch[1], conversationMatch[2], method, request, response); return; }
-      const bugMatch = path.match(/^\/api\/bugs\/([^/]+)(?:\/(retry|cancel|progress|artifacts))?$/);
+      const bugMatch = path.match(/^\/api\/bugs\/([^/]+)(?:\/(retry|cancel|progress|artifacts|events))?$/);
       if (path === '/api/bugs' && method === 'GET') {
         const all = this.repo.listBugs(); const status = parsed.searchParams.get('status'); const target = parsed.searchParams.get('target') ?? parsed.searchParams.get('executionTarget'); const query = (parsed.searchParams.get('q') ?? parsed.searchParams.get('search') ?? '').toLowerCase();
         const bugs = all.filter((bug) => (!status || this.statusFor(bug) === status) && (!target || bug.executionTarget === target) && (!query || `${bug.bugKey} ${bug.title}`.toLowerCase().includes(query))).map((bug) => this.dashboardItem(bug));
         send(response, 200, { bugs, items: bugs, total: bugs.length, filters: { status: status ?? null, target: target ?? null, q: query || null } }); return;
       }
-      if (bugMatch) { await this.handleBug(bugMatch[1], bugMatch[2], method, response); return; }
+      if (bugMatch) { await this.handleBug(bugMatch[1], bugMatch[2], method, response, parsed.searchParams); return; }
       const page = method === 'GET' ? this.pageRenderer?.(path) : undefined;
       if (page !== undefined) { sendPage(response, page); return; }
       send(response, 404, { error: 'Route not found' });
@@ -406,10 +421,15 @@ export class BugApiServer {
     let job: unknown = null; if (finalStatus === 'QUEUED' && this.queue) job = this.queue.enqueueJob(final.id, final.bugKey);
     updateConversation(this.repo, conversation.id, draft, finalCompleteness, 'submitted'); send(response, 201, { bug: final, bugKey: final.bugKey, status: finalStatus, job, completeness: finalCompleteness, ...this.documentResponse(conversation.id, document) });
   }
-  private async handleBug(id: string, action: string | undefined, method: string, response: http.ServerResponse): Promise<void> {
+  private async handleBug(id: string, action: string | undefined, method: string, response: http.ServerResponse, searchParams?: URLSearchParams): Promise<void> {
     const bug = this.repo.getBug(id); if (!bug) { send(response, 404, { error: 'Bug report not found' }); return; }
     if (!action && method === 'GET') { send(response, 200, this.detailFor(bug)); return; }
     if (action === 'progress' && method === 'GET') { const jobs = this.jobsFor(bug); send(response, 200, { bugKey: bug.bugKey, status: this.statusFor(bug), jobs, latest: jobs.at(-1) ?? null }); return; }
+    if (action === 'events' && method === 'GET') {
+      const query = this.parseWorkerEventQuery(searchParams ?? new URLSearchParams());
+      if ('error' in query) { send(response, 400, { error: query.error }); return; }
+      send(response, 200, this.workerEventsResponse(bug, query)); return;
+    }
     if (action === 'artifacts' && method === 'GET') { const artifacts = this.artifactsFor(bug.bugKey); send(response, 200, { bugKey: bug.bugKey, files: Object.keys(artifacts), artifacts }); return; }
     if (action === 'cancel' && method === 'POST') { this.cancelBug(bug, response); return; }
     if (action === 'retry' && method === 'POST') { this.retryBug(bug, response); return; }
@@ -417,9 +437,82 @@ export class BugApiServer {
   }
 
   private isReady(): boolean { try { this.repo.listBugs(); return true; } catch { return false; } }
-  private jobsFor(bug: { id: string }): QueueJobLike[] { return this.queue?.listJobs?.().filter((job) => job.bugId === bug.id) ?? []; }
+  private jobsFor(bug: { id: string }): QueueJobLike[] {
+    const listed = this.queue?.listJobs?.();
+    if (listed) return listed.filter((job) => job.bugId === bug.id);
+    // The standalone API is also used without a queue adapter (for example
+    // during recovery). Read the durable row so an INTERRUPTED job is still
+    // visible instead of accidentally looking like there is no job.
+    const database = (this.repo as unknown as { database?: { prepare: (sql: string) => { all: (...args: unknown[]) => unknown[] } } }).database;
+    if (!database) return [];
+    try {
+      return (database.prepare('SELECT * FROM jobs WHERE bug_id = ? ORDER BY created_at ASC').all(bug.id) as Array<Record<string, unknown>>).map((row) => ({
+        id: String(row.id), bugId: String(row.bug_id), status: String(row.status), priority: Number(row.priority ?? 0), attempt: Number(row.attempt ?? 0),
+        createdAt: String(row.created_at), startedAt: row.started_at == null ? null : String(row.started_at), finishedAt: row.finished_at == null ? null : String(row.finished_at),
+        heartbeatAt: row.heartbeat_at == null ? null : String(row.heartbeat_at), error: row.error == null ? null : String(row.error), workerId: row.worker_id == null ? null : String(row.worker_id),
+      }));
+    } catch { return []; }
+  }
   private statusFor(bug: any): string { if (typeof bug.status === 'string') return bug.status; const database = (this.repo as unknown as { database?: { prepare: (sql: string) => { get: (...args: string[]) => unknown } } }).database; if (!database) return 'DRAFT'; const row = database.prepare('SELECT status FROM bug_reports WHERE id = ? OR bug_key = ?').get(bug.id, bug.bugKey) as { status?: string } | undefined; return row?.status ?? 'DRAFT'; }
-  private dashboardItem(bug: any): Record<string, unknown> { const jobs = this.jobsFor(bug); const latest = jobs.at(-1); return { ...bug, key: bug.bugKey, target: bug.executionTarget, status: this.statusFor(bug), completeness: bug.intake?.completenessScore ?? 0, created: bug.createdAt, fixBranch: null, branch: null, job: latest ?? null }; }
+  private dashboardItem(bug: any): Record<string, unknown> { const jobs = this.jobsFor(bug); const latest = jobs.at(-1); return { ...bug, key: bug.bugKey, target: bug.executionTarget, status: this.statusFor(bug), completeness: bug.intake?.completenessScore ?? 0, created: bug.createdAt, fixBranch: null, branch: null, job: latest ?? null, jobStatus: latest?.status ?? null }; }
+
+  private parseWorkerEventQuery(params: URLSearchParams): { after: number; before?: number; limit: number } | { error: string } {
+    const readCursor = (name: string): number | undefined | string => {
+      const raw = params.get(name);
+      if (raw === null || raw === '') return undefined;
+      if (!/^\d+$/.test(raw)) return `${name} must be a non-negative integer`;
+      const value = Number(raw);
+      return Number.isSafeInteger(value) ? value : `${name} is too large`;
+    };
+    const after = readCursor('after'); if (typeof after === 'string') return { error: after };
+    const before = readCursor('before'); if (typeof before === 'string') return { error: before };
+    const rawLimit = params.get('limit');
+    const limit = rawLimit === null || rawLimit === '' ? 100 : Number(rawLimit);
+    if (!/^\d+$/.test(rawLimit ?? '100') || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) return { error: 'limit must be an integer between 1 and 100' };
+    if (after !== undefined && before !== undefined) return { error: 'after and before cannot be used together' };
+    return { after: after ?? 0, ...(before === undefined ? {} : { before }), limit };
+  }
+
+  private workerEventsResponse(bug: { id: string }, query: { after: number; before?: number; limit: number }): Record<string, unknown> {
+    const events = this.listWorkerEvents(bug.id, query);
+    const last = events.at(-1)?.sequence ?? query.after;
+    const first = events[0]?.sequence ?? query.before ?? 0;
+    return {
+      events,
+      // Cursors are numeric and scoped to this bug.  A client can use
+      // nextAfter for polling and firstSequence as `before` for history.
+      nextAfter: last,
+      firstSequence: first,
+      hasMore: events.length >= query.limit,
+    };
+  }
+
+  private listWorkerEvents(bugId: string, query: { after: number; before?: number; limit: number }): WorkerEventLike[] {
+    const repositoryQuery = query.before === undefined ? query : { before: query.before, limit: query.limit };
+    return this.normalizeWorkerEvents(this.repo.listWorkerEvents(bugId, repositoryQuery));
+  }
+
+  private normalizeWorkerEvents(value: unknown): WorkerEventLike[] {
+    if (!Array.isArray(value)) return [];
+    return value.map((entry, index) => {
+      const row = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {};
+      const number = (keys: string[]): number | null => { const candidate = keys.map((key) => row[key]).find((item) => typeof item === 'number' || (typeof item === 'string' && /^\d+$/.test(item))); return candidate === undefined ? null : Number(candidate); };
+      const string = (keys: string[], fallback: string): string => { const candidate = keys.map((key) => row[key]).find((item) => typeof item === 'string'); return candidate === undefined ? fallback : candidate; };
+      const sequence = number(['sequence', 'seq', 'eventSequence', 'event_seq']) ?? index + 1;
+      return {
+        sequence,
+        occurredAt: string(['occurredAt', 'createdAt', 'timestamp', 'occurred_at'], now()),
+        role: string(['role', 'agentRole', 'agent_role'], 'worker'),
+        eventType: string(['eventType', 'type', 'event_type'], 'event'),
+        tool: (() => { const item = ['tool', 'toolName', 'tool_name'].map((key) => row[key]).find((candidate) => typeof candidate === 'string'); return item === undefined ? null : item; })(),
+        isError: row.isError === true || row.isError === 1 || row.isError === 'true' || row.isError === '1' || row.is_error === true || row.is_error === 1 || row.is_error === 'true' || row.is_error === '1' || row.error === true || row.error === 1 || row.error === 'true' || row.error === '1',
+        turnIndex: number(['turnIndex', 'turn', 'turn_index']),
+        toolCallCount: number(['toolCallCount', 'toolCalls', 'tool_call_count', 'tool_calls']),
+        summary: string(['summary', 'message', 'detail'], ''),
+        jobId: (() => { const item = row.jobId ?? row.job_id; return typeof item === 'string' ? item : null; })(),
+      };
+    });
+  }
   private detailFor(bug: any): Record<string, unknown> {
     const jobs = this.jobsFor(bug); let conversation: BugConversation | null = null; let messages: unknown[] = []; if (bug.intake?.conversationId) { conversation = this.repo.getConversation(bug.intake.conversationId); if (conversation) messages = this.repo.listMessages(conversation.id); }
     const document = (() => {

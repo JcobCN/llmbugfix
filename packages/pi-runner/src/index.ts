@@ -38,6 +38,19 @@ const StrictReviewResultSchema = ReviewResultSchema.strict();
 export type AgentFixResultChecked = z.infer<typeof StrictFixResultSchema>;
 export type ReviewResultChecked = z.infer<typeof StrictReviewResultSchema>;
 
+/** A bounded, structured execution event. It intentionally contains no model
+ * prompt, response, or tool result body. */
+export type PiProgressEvent = {
+  role: 'fixer' | 'reviewer';
+  eventType: string;
+  tool?: string | null;
+  isError?: boolean;
+  turnIndex?: number | null;
+  toolCallCount?: number | null;
+  summary: string;
+};
+export type PiProgressSink = (event: PiProgressEvent) => void | Promise<void>;
+
 /** Minimal structural logger so callers can pass a pino logger without a package dependency. */
 export type PiRunnerLogger = { info: (obj: object, msg: string) => void; error: (obj: object, msg: string) => void };
 
@@ -70,6 +83,7 @@ export interface FixerInput {
   skills?: Array<{ path: string; content: string }>;
   attachments?: Array<{ id: string; text?: string; analysis?: string }>;
   signal?: AbortSignal;
+  progress?: PiProgressSink;
 }
 
 export interface ReviewerInput {
@@ -80,6 +94,7 @@ export interface ReviewerInput {
   filesChanged: string[];
   validation: DeterministicValidation;
   signal?: AbortSignal;
+  progress?: PiProgressSink;
 }
 
 export interface AgentRunner {
@@ -297,6 +312,25 @@ function summarizeToolParams(tool: string, params: unknown): Record<string, stri
   if (tool === 'grep' && typeof value.pattern === 'string') return { pattern: redactedToolValue(value.pattern), ...(typeof value.path === 'string' ? { path: value.path } : {}) };
   if (tool === 'find') { if (typeof value.pattern === 'string') return { pattern: clip(value.pattern) }; }
   return { params: redactedToolValue(JSON.stringify(value)) };
+}
+
+/**
+ * Stricter summary for events persisted to the dashboard. Shell commands and
+ * search patterns can contain arbitrary credentials that regex redaction
+ * cannot reliably identify, so only bounded file-operation metadata crosses
+ * this persistence boundary. The richer audit summary remains terminal-only.
+ */
+function summarizePersistedToolParams(tool: string, params: unknown): Record<string, string | number> {
+  const value = (params ?? {}) as Record<string, unknown>;
+  if (!['read', 'edit', 'write'].includes(tool) || typeof value.path !== 'string') return {};
+  const summary: Record<string, string | number> = { path: redactedToolValue(value.path, 300) };
+  if (tool === 'read') {
+    if (typeof value.offset === 'number') summary.offset = value.offset;
+    if (typeof value.limit === 'number') summary.limit = value.limit;
+  }
+  if (tool === 'edit' && Array.isArray(value.edits)) summary.edits = value.edits.length;
+  if (tool === 'write' && typeof value.content === 'string') summary.bytes = value.content.length;
+  return summary;
 }
 
 const redactedToolValue = (value: string, max = 500): string => {
@@ -549,7 +583,7 @@ export class PiAgentRunner implements AgentRunner {
     return this.runtimePromise;
   }
 
-  private async runRole<T>(role: 'fixer' | 'reviewer', cwd: string, prompt: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, signal?: AbortSignal, completion?: SubmitFixResultToolOptions): Promise<T> {
+  private async runRole<T>(role: 'fixer' | 'reviewer', cwd: string, prompt: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, signal?: AbortSignal, completion?: SubmitFixResultToolOptions, progress?: PiProgressSink): Promise<T> {
     if (role === 'fixer' && this.requireSandbox && !this.sandboxProfile) throw new Error('Pi fixer is disabled: PI_SANDBOX_PROFILE must name an externally enforced sandbox');
     if (signal?.aborted) throw new Error('Pi session cancelled');
     const runtime = await this.getRuntime();
@@ -592,6 +626,11 @@ export class PiAgentRunner implements AgentRunner {
     const maxRepeatedToolCalls = role === 'fixer' ? this.fixerMaxRepeatedToolCalls : this.reviewerMaxRepeatedToolCalls;
     const closeoutGraceMs = role === 'fixer' ? this.fixerCloseoutGraceMs : this.reviewerCloseoutGraceMs;
     const closeoutText = 'Stop inspecting and editing now. Submit the structured result with submit_fix_result (fixer) or the exact JSON fallback immediately. Do not start another tool call.';
+    const emitProgress = (event: PiProgressEvent): void => {
+      if (!progress) return;
+      try { void Promise.resolve(progress(event)).catch((error) => this.logger?.error({ role, error: error instanceof Error ? error.message : String(error) }, 'pi progress sink failed')); }
+      catch (error) { this.logger?.error({ role, error: error instanceof Error ? error.message : String(error) }, 'pi progress sink failed'); }
+    };
     const unsubscribe = session.subscribe?.((event) => {
       const summary: Record<string, string | number | boolean> = { role, type: event.type };
       const eventTurnIndex = 'turnIndex' in event && typeof event.turnIndex === 'number' ? event.turnIndex : undefined;
@@ -607,6 +646,14 @@ export class PiAgentRunner implements AgentRunner {
         summary.repeatedToolCalls = repeatedToolCalls;
       }
       if (event.type === 'tool_execution_end') { summary.tool = event.toolName; summary.isError = event.isError; }
+      if (event.type === 'turn_start' || event.type === 'turn_end' || event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
+        const tool = 'toolName' in event && typeof event.toolName === 'string' ? event.toolName : undefined;
+        const persistedParams = tool && 'args' in event ? summarizePersistedToolParams(tool, event.args) : {};
+        const safeSummary = event.type === 'tool_execution_start' && tool
+          ? `${tool} started${Object.keys(persistedParams).length ? ` (${JSON.stringify(persistedParams)})` : ''}`
+          : event.type === 'tool_execution_end' && tool ? `${tool} completed` : event.type.replaceAll('_', ' ');
+        emitProgress({ role, eventType: event.type, ...(tool ? { tool } : {}), ...('isError' in event && typeof event.isError === 'boolean' ? { isError: event.isError } : {}), ...(eventTurnIndex === undefined ? {} : { turnIndex: eventTurnIndex }), ...(toolCalls ? { toolCallCount: toolCalls } : {}), summary: safeSummary });
+      }
       if (event.type === 'auto_retry_start' || event.type === 'auto_retry_end' || event.type === 'compaction_start' || event.type === 'compaction_end') {
         this.logger?.info(summary, `pi ${role} session event`);
       } else if (event.type === 'turn_start' || event.type === 'turn_end' || event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
@@ -643,6 +690,7 @@ export class PiAgentRunner implements AgentRunner {
     try {
       const operation = (async () => {
         this.logger?.info({ role, cwd, promptBytes: prompt.length }, `pi ${role} session prompt`);
+        emitProgress({ role, eventType: 'session_start', summary: `${role} session started` });
         // A steer is queued while the original prompt is streaming. Race the
         // session's completion against the one-shot grace deadline so an SDK
         // prompt that only settles after abort cannot keep this operation
@@ -718,7 +766,12 @@ export class PiAgentRunner implements AgentRunner {
         }, timeoutMs);
       });
       const cancelled = signal ? new Promise<never>((_, reject) => signal.addEventListener('abort', () => { void Promise.resolve(session.abort()).catch(() => undefined); reject(new Error(`Pi ${role} session cancelled`)); }, { once: true })) : undefined;
-      return await Promise.race(cancelled ? [operation, timeout, cancelled] : [operation, timeout]);
+      const result = await Promise.race(cancelled ? [operation, timeout, cancelled] : [operation, timeout]);
+      emitProgress({ role, eventType: 'completed', summary: `${role} completed` });
+      return result;
+    } catch (error) {
+      emitProgress({ role, eventType: 'failed', isError: true, summary: redactedToolValue(error instanceof Error ? error.message : String(error), 1024) });
+      throw error;
     } finally {
       if (timer) clearTimeout(timer);
       if (closeoutTimer) clearTimeout(closeoutTimer);
@@ -734,7 +787,7 @@ export class PiAgentRunner implements AgentRunner {
     const task = BugFixTaskSchema.parse(input.task);
     const profile = EnvironmentProfileSchema.parse(input.profile);
     const completion: SubmitFixResultToolOptions = { expectedBugKey: task.bugKey, logger: this.logger, onSubmit: () => undefined };
-    const result = await this.runRole('fixer', input.worktreePath, fixerPrompt({ ...input, task, profile }, input.safety || this.safety), StrictFixResultSchema, input.signal, completion);
+    const result = await this.runRole('fixer', input.worktreePath, fixerPrompt({ ...input, task, profile }, input.safety || this.safety), StrictFixResultSchema, input.signal, completion, input.progress);
     if (result.bugKey !== task.bugKey) throw new Error(`Pi fixer returned bugKey ${result.bugKey}, expected ${task.bugKey}`);
     return result;
   }
@@ -743,7 +796,7 @@ export class PiAgentRunner implements AgentRunner {
     const task = BugFixTaskSchema.parse(input.task);
     const profile = EnvironmentProfileSchema.parse(input.profile);
     const validation = DeterministicValidationSchema.parse(input.validation);
-    return this.runRole('reviewer', input.worktreePath, reviewerPrompt({ ...input, task, profile, validation }), StrictReviewResultSchema, input.signal);
+    return this.runRole('reviewer', input.worktreePath, reviewerPrompt({ ...input, task, profile, validation }), StrictReviewResultSchema, input.signal, undefined, input.progress);
   }
 }
 
@@ -754,11 +807,15 @@ export class FakePiRunner implements AgentRunner {
   async runFixer(input: FixerInput): Promise<AgentFixResultChecked> {
     const sessionId = newId();
     this.fixerSessions.push(sessionId);
-    return StrictFixResultSchema.parse(this.fixResult ?? { bugKey: input.task.bugKey, status: 'fixed', confidence: 1, summary: 'Fake fixer result', rootCause: null, reproduced: true, regressionTestAdded: false, filesChanged: [], riskNotes: [], blockedReason: null, missingInformation: [] });
+    const result = StrictFixResultSchema.parse(this.fixResult ?? { bugKey: input.task.bugKey, status: 'fixed', confidence: 1, summary: 'Fake fixer result', rootCause: null, reproduced: true, regressionTestAdded: false, filesChanged: [], riskNotes: [], blockedReason: null, missingInformation: [] });
+    await input.progress?.({ role: 'fixer', eventType: 'completed', summary: 'fixer completed' });
+    return result;
   }
   async runReviewer(input: ReviewerInput): Promise<ReviewResultChecked> {
     const sessionId = newId();
     this.reviewerSessions.push(sessionId);
-    return StrictReviewResultSchema.parse(this.reviewResult ?? { verdict: input.validation.passed ? 'approve' : 'reject', bugAddressed: input.validation.passed, regressionRisk: 'low', summary: 'Fake review result', findings: [] });
+    const result = StrictReviewResultSchema.parse(this.reviewResult ?? { verdict: input.validation.passed ? 'approve' : 'reject', bugAddressed: input.validation.passed, regressionRisk: 'low', summary: 'Fake review result', findings: [] });
+    await input.progress?.({ role: 'reviewer', eventType: 'completed', summary: 'reviewer completed' });
+    return result;
   }
 }

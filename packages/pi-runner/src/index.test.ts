@@ -8,6 +8,12 @@ const task = { bugKey: 'BUG-000001', title: 'test', executionTarget: 'backend', 
 const profile: EnvironmentProfile = { id: 'p', name: 'p', target: 'backend', type: 'backend', repository: '/tmp/repo', repoUrl: '/tmp/repo', defaultBranch: 'main', baseBranch: 'main', instructions: [], markdown: [], skills: [], documentationPaths: [], skillPaths: [], setupCommands: [], validationCommands: [], setup: [], validation: [], runtime: undefined };
 describe('FakePiRunner', () => {
   it('uses independent fixer and reviewer sessions', async () => { const runner = new FakePiRunner(); const fix = await runner.runFixer({ worktreePath: '/tmp', task, profile, safety: 'safe' }); await runner.runReviewer({ worktreePath: '/tmp', task, profile, diff: '', filesChanged: fix.filesChanged, validation: { passed: true, commands: [], results: [], summary: '', artifacts: [] } }); expect(runner.fixerSessions[0]).toBeTruthy(); expect(runner.fixerSessions[0]).not.toBe(runner.reviewerSessions[0]); });
+  it('forwards bounded completion events through the explicit progress sink', async () => {
+    const events: string[] = [];
+    const runner = new FakePiRunner();
+    await runner.runFixer({ worktreePath: '/tmp', task, profile, safety: 'safe', progress: (event) => { events.push(`${event.role}:${event.eventType}:${event.summary}`); } });
+    expect(events).toEqual(['fixer:completed:fixer completed']);
+  });
 });
 
 const fixResult = {
@@ -220,6 +226,22 @@ describe('PiAgentRunner', () => {
     await expect(runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' })).rejects.toThrow(/budget/);
     expect(abort).toHaveBeenCalled();
     expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('never persists shell command arguments in progress events', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    let listener: ((event: any) => void) | undefined;
+    const session = {
+      prompt: vi.fn(async () => { listener?.({ type: 'tool_execution_start', toolName: 'bash', args: { command: 'curl -H "Authorization: Bearer top-secret" https://example.test' } }); }),
+      getLastAssistantText: vi.fn(() => JSON.stringify(fixResult)), abort: vi.fn(async () => undefined), dispose: vi.fn(),
+      subscribe: vi.fn((fn) => { listener = fn; return () => undefined; }),
+    } as unknown as PiSession;
+    const events: Array<{ eventType: string; summary: string }> = [];
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, sessionFactory: async () => ({ session }) });
+    await runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe', progress: (event) => { events.push(event); } });
+    const toolEvent = events.find((event) => event.eventType === 'tool_execution_start');
+    expect(toolEvent?.summary).toBe('bash started');
+    expect(JSON.stringify(events)).not.toContain('top-secret');
   });
 
   it('accepts a reviewer JSON result produced by the single budget closeout steer', async () => {

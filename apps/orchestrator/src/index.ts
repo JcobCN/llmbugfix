@@ -7,7 +7,7 @@ import { JobQueue, type QueueJob } from '@llmbugfix/job-queue';
 import { EnvironmentResolver, type EnvironmentProfile } from '@llmbugfix/environment-resolver';
 import { RepoManager } from '@llmbugfix/repo-manager';
 import { EnvironmentRunner } from '@llmbugfix/environment-runner';
-import { FakePiRunner, PiAgentOutputFormatError, PiAgentRunnerTimeoutError, PiAgentLoopBudgetError, type AgentRunner } from '@llmbugfix/pi-runner';
+import { FakePiRunner, PiAgentOutputFormatError, PiAgentRunnerTimeoutError, PiAgentLoopBudgetError, type AgentRunner, type PiProgressEvent } from '@llmbugfix/pi-runner';
 import { Validator, DeterministicValidationSchema, type DeterministicValidation } from '@llmbugfix/validator';
 import { BugFixTaskSchema, AgentFixResultSchema, FixCandidateMetadataSchema, ReviewResultSchema, GitResultSchema, type AttachmentRef, type BugFixTask, type BugReport, type FixCandidateMetadata } from '@llmbugfix/bug-domain';
 
@@ -32,6 +32,12 @@ export class Orchestrator {
   private writeArtifact(dir: string, filename: string, value: unknown): void { fs.writeFileSync(path.join(dir, filename), `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 }); }
   private writeRawArtifact(dir: string, filename: string, value: string): void { fs.writeFileSync(path.join(dir, filename), value, { mode: 0o600 }); }
   private async transition(bug: BugReport, status: Parameters<SQLiteBugRepository['changeBugStatus']>[1], payload: unknown = {}): Promise<void> { this.repo.changeBugStatus(bug.bugKey, status, 'pipeline', payload); }
+  private progressSink(jobId: string, bugId: string): (event: PiProgressEvent) => void {
+    return (event) => {
+      try { this.repo.appendWorkerEvent({ ...event, jobId, bugId }); }
+      catch (error) { logger.warn({ jobId, bugId, error: error instanceof Error ? error.message : String(error) }, 'Worker progress event persistence failed'); }
+    };
+  }
   private attachmentsFor(bug: BugReport): AttachmentRef[] {
     // The repository table is authoritative for uploads; the report projection
     // may contain attachments from before that table was introduced.
@@ -95,7 +101,7 @@ export class Orchestrator {
       } else {
         fixerInFlight = true;
         const fixerStartedAt = now();
-        const result = await this.agentRunner.runFixer({ worktreePath, task, profile, safety: 'No network, push, merge, deploy, production access, or dependency downloads.', docs: resolved.markdown.map((x) => ({ path: x.path, content: x.content })), skills: resolved.skills.map((x) => ({ path: x.path, content: x.content })), attachments: attachments.map((x) => ({ id: x.id, text: x.extractedText ?? undefined, analysis: x.analysisResult ?? undefined })), signal: cancellation.signal });
+        const result = await this.agentRunner.runFixer({ worktreePath, task, profile, safety: 'No network, push, merge, deploy, production access, or dependency downloads.', docs: resolved.markdown.map((x) => ({ path: x.path, content: x.content })), skills: resolved.skills.map((x) => ({ path: x.path, content: x.content })), attachments: attachments.map((x) => ({ id: x.id, text: x.extractedText ?? undefined, analysis: x.analysisResult ?? undefined })), signal: cancellation.signal, progress: this.progressSink(jobId, bugId) });
         fixerInFlight = false;
         this.checkpoint(jobId, bugId); fixResult = AgentFixResultSchema.strict().parse(result); this.writeArtifact(artifactDir, 'agent-result.json', fixResult);
         this.repo.createAgentRun({ bugId: bug.id, jobId, agentType: 'fixer', status: 'COMPLETED', sessionId: null, startedAt: fixerStartedAt, finishedAt: now(), input: { bugKey: bug.bugKey }, output: fixResult, error: null });
@@ -107,7 +113,7 @@ export class Orchestrator {
       if (fixResult.status !== 'fixed') { await this.transition(bug, 'FIX_FAILED', fixResult); this.queue.failJob(jobId, fixResult.blockedReason ?? 'Fixer failed', workerId); pipeline.status = 'FIX_FAILED'; pipeline.error = fixResult.blockedReason; return; }
       await this.transition(bug, 'VALIDATING'); this.checkpoint(jobId, bugId); const validationCommands = profile.validationCommands.length ? profile.validationCommands : profile.validation; const validation = await this.validator.runValidation(worktreePath, validationCommands, { signal: cancellation.signal }); const checkedValidation = DeterministicValidationSchema.parse({ ...validation, results: validation.results }); this.writeArtifact(artifactDir, 'validation.json', checkedValidation); this.checkpoint(jobId, bugId);
       if (!checkedValidation.passed) { await this.transition(bug, 'VALIDATION_FAILED', checkedValidation); this.queue.failJob(jobId, 'Deterministic validation failed', workerId); pipeline.status = 'VALIDATION_FAILED'; pipeline.error = 'Deterministic validation failed'; return; }
-      await this.transition(bug, 'REVIEWING'); this.checkpoint(jobId, bugId); const diff = await this.repoManager.diff(worktreePath); this.writeRawArtifact(artifactDir, 'diff.patch', diff); const actualFiles = await this.repoManager.filesChanged(worktreePath); this.checkpoint(jobId, bugId); const review = await this.agentRunner.runReviewer({ worktreePath, task, profile, diff, filesChanged: actualFiles, validation: checkedValidation, signal: cancellation.signal }); this.checkpoint(jobId, bugId); this.writeArtifact(artifactDir, 'review.json', ReviewResultSchema.strict().parse(review));
+      await this.transition(bug, 'REVIEWING'); this.checkpoint(jobId, bugId); const diff = await this.repoManager.diff(worktreePath); this.writeRawArtifact(artifactDir, 'diff.patch', diff); const actualFiles = await this.repoManager.filesChanged(worktreePath); this.checkpoint(jobId, bugId); const review = await this.agentRunner.runReviewer({ worktreePath, task, profile, diff, filesChanged: actualFiles, validation: checkedValidation, signal: cancellation.signal, progress: this.progressSink(jobId, bugId) }); this.checkpoint(jobId, bugId); this.writeArtifact(artifactDir, 'review.json', ReviewResultSchema.strict().parse(review));
       if (review.verdict !== 'approve' || !review.bugAddressed || review.regressionRisk === 'high') { await this.transition(bug, 'REVIEW_REJECTED', review); this.queue.failJob(jobId, `Review gate rejected: ${review.summary}`, workerId); pipeline.status = 'REVIEW_REJECTED'; pipeline.error = review.summary; return; }
       await this.transition(bug, 'FIX_READY', review); this.writeArtifact(artifactDir, 'git-result.json', GitResultSchema.parse({ success: false, branch, commitSha: null, mergeRequestUrl: null, pushed: false, error: this.options.dryRun ? 'DRY_RUN' : null }));
       if (candidateMetadata) { try { fs.renameSync(path.join(artifactDir, 'candidate.json'), path.join(artifactDir, 'candidate-used.json')); } catch { /* audit artifact cleanup is best effort */ } }

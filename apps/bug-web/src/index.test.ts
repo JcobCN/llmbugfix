@@ -206,6 +206,11 @@ describe('conversational intake page', () => {
     const dashRoute = resolveWebRoute('/dashboard');
     expect(dashRoute?.contentType).toBe('text/html; charset=utf-8');
     expect(dashRoute?.body).toContain('Bug Dashboard');
+    expect(dashRoute?.body).toContain('Job Status');
+    const dashboardScript = clientScripts.dashboard;
+    expect(dashboardScript).toContain('data-log-toggle');
+    expect(dashboardScript).toContain('/events?');
+    expect(dashboardScript).toContain('setInterval(() => { if (!document.hidden) void load(); }, 2000)');
 
     const detailRoute = resolveWebRoute('/bugs/BUG-123');
     expect(detailRoute?.contentType).toBe('text/html; charset=utf-8');

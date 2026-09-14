@@ -64,6 +64,14 @@ describe('Bug API routes', () => {
     expect(detail.data.progress.status).toBe('QUEUED');
     expect(detail.data.messages.length).toBeGreaterThan(0);
     expect(detail.data.document.content).toMatch(/^# /u);
+    const job = repository.enqueueJob(submitted.data.bugKey);
+    repository.appendWorkerEvent({ bugId: submitted.data.bugKey, jobId: job.id, role: 'fixer', eventType: 'tool_execution_start', tool: 'bash', summary: 'pnpm test' });
+    const events = await server.inject<{ events: Array<{ sequence: number; tool: string; summary: string }>; nextAfter: number }>({ url: `/api/bugs/${submitted.data.bugKey}/events?before=9007199254740991&limit=10` });
+    expect(events.status, events.raw).toBe(200);
+    expect(events.data.events).toMatchObject([{ sequence: 1, tool: 'bash', summary: 'pnpm test' }]);
+    expect(events.data.nextAfter).toBe(1);
+    expect((await server.inject({ url: `/api/bugs/${submitted.data.bugKey}/events?after=-1` })).status).toBe(400);
+    expect((await server.inject({ url: `/api/bugs/${submitted.data.bugKey}/events?limit=101` })).status).toBe(400);
     expect((await server.inject({ url: '/api/health/live' })).status).toBe(200);
     expect((await server.inject({ url: '/api/health/ready' })).status).toBe(200);
     const cancelled = await server.inject<{ bug: { status: string }; semantic: string }>({ method: 'POST', url: `/api/bugs/${submitted.data.bugKey}/cancel` });
