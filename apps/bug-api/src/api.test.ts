@@ -46,10 +46,11 @@ describe('Bug API routes', () => {
     expect(repository.listBugs()).toHaveLength(0);
 
     await server.inject({ method: 'PATCH', url: `/api/bugs/conversations/${id}/draft`, body: { draft: { component: 'login', environmentProfile: { name: 'storefront', repositoryUrl: 'https://git.example.test/team/storefront.git' } } } });
-    const submitted = await server.inject<{ bugKey: string; status: string }>({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirmed: true } });
+    const submitted = await server.inject<{ bugKey: string; status: string; bug: { title: string } }>({ method: 'POST', url: `/api/bugs/conversations/${id}/submit`, body: { confirmed: true } });
     expect(submitted.status, submitted.raw).toBe(201);
     expect(submitted.data.bugKey).toMatch(/^BUG-\d{6}$/);
     expect(submitted.data.status).toBe('QUEUED');
+    expect(submitted.data.bug.title).toBe('[storefront]-[用户登录异常]');
 
     const list = await server.inject<{ bugs: unknown[] }>({ url: '/api/bugs' });
     expect(list.status).toBe(200);

@@ -1,9 +1,33 @@
 import { describe, it, expect } from 'vitest';
-import { FakeDocumentReconciler, FakeIntakeModel, IntakeService, OpenAICompatibleDocumentReconciler, OpenAICompatibleIntakeModel, applyDocumentReconciliation, extractPartialQuestions, mergeBugDocument, mergeDraft, reconcileBugDocument, renderBugDocument, sha256Document, type IntakeModel, type IntakeModelInput, type IntakeProgressEvent, type IntakeTurnResult } from '@llmbugfix/intake-agent';
+import { FakeDocumentReconciler, FakeIntakeModel, IntakeService, OpenAICompatibleDocumentReconciler, OpenAICompatibleIntakeModel, applyDocumentReconciliation, extractPartialQuestions, mergeBugDocument, mergeDraft, normalizeBugTitle, reconcileBugDocument, renderBugDocument, sha256Document, type IntakeModel, type IntakeModelInput, type IntakeProgressEvent, type IntakeTurnResult } from '@llmbugfix/intake-agent';
 import type { BugReportDraft } from '@llmbugfix/bug-domain';
 import { evaluateCompleteness } from '@llmbugfix/intake-policy';
 
 describe('Intake Agent & Service', () => {
+  it('normalizes titles as module and observable problem', () => {
+    expect(normalizeBugTitle({
+      title: 'hello',
+      actualBehavior: 'hello',
+      component: 'app-honourbell-store',
+      reproduction: { steps: ['前端项目问题，store，点击module分类，切换无反应。预期结果，点击tab切换能正常切换！'] },
+    })).toBe('[app-honourbell-store]-[点击module分类，切换无反应]');
+    expect(normalizeBugTitle({
+      actualBehavior: '查询订单接口返回 500',
+      environmentProfile: { repositoryUrl: 'https://git.example.test/team/order-api.git' },
+    })).toBe('[order-api]-[查询订单接口返回 500]');
+    expect(normalizeBugTitle({ title: 'hello', actualBehavior: 'test', component: 'store' })).toBeUndefined();
+  });
+
+  it('replaces an early greeting title after the module and problem are known', async () => {
+    const result = await new IntakeService(new FakeIntakeModel()).processTurn(
+      { title: 'hello', actualBehavior: 'hello' },
+      [],
+      '前端项目问题，store，点击module分类，切换无反应。预期结果，点击tab切换能正常切换！',
+    );
+    expect(result.updatedDraft.title).toBe('[store]-[点击module分类，切换无反应]');
+    expect(result.turn.fieldUpdates.title).toBe(result.updatedDraft.title);
+  });
+
   it('processes natural language message with FakeIntakeModel', async () => {
     const model = new FakeIntakeModel();
     const service = new IntakeService(model);

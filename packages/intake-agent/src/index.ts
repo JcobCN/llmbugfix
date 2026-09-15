@@ -397,7 +397,8 @@ Rules:
 13. Preserve reporter-authored additional notes when normalizing the document, and never claim a revision is synchronized unless the structured draft was derived from that revision/hash.
 14. For every report, ask the tester for its Git remote clone URL (HTTPS or SSH) when it is not already present in the current draft, even if an existing environmentProfileId is known. A profile ID never replaces this required URL. Do not ask for a local filesystem path. Once the remote is known, return it in fieldUpdates.environmentProfile.repositoryUrl; also return a concise project name in fieldUpdates.environmentProfile.name, the frontend/backend target in fieldUpdates.environmentProfile.target, and defaultBranch when known. setupCommands and validationCommands are optional and should only be included when the tester provides them; never invent them.
 15. Do not ask for internal field names or schema values. Ask for human-understandable facts only.
-16. Return only JSON matching the supplied IntakeTurnResult schema. The server applies the deterministic four-fact gate after this turn; do not ask optional enhancement questions when those four facts are already present. The optional profile shape is { name?, repositoryUrl?, defaultBranch?, target?: "frontend"|"backend", setupCommands?: string[], validationCommands?: string[] }.`;
+16. Return only JSON matching the supplied IntakeTurnResult schema. The server applies the deterministic four-fact gate after this turn; do not ask optional enhancement questions when those four facts are already present. The optional profile shape is { name?, repositoryUrl?, defaultBranch?, target?: "frontend"|"backend", setupCommands?: string[], validationCommands?: string[] }.
+17. The title must use the exact format "[module-name]-[problem symptom]". Use the confirmed project/module name and a concise observable failure, not a greeting, generic wording, suspected root cause, or fix. When later facts make an existing title incomplete, generic, or incorrectly formatted, return the corrected title in fieldUpdates.title.`;
 
 const INTAKE_OUTPUT_CONTRACT = `Return a JSON object with ALL of these top-level fields:
 {
@@ -515,6 +516,41 @@ export function detectContradictions(currentDraft: BugReportDraft, fieldUpdates:
 }
 
 function textLines(text: string): string[] { return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean); }
+const lowQualityTitlePart = /^(?:hello|hi|hey|test|testing|bug|issue|problem|unknown|unspecified bug|未命名(?:问题|bug)|测试|有问题|存在问题|页面问题|功能问题|项目问题|问题|你好|您好)$/iu;
+const cleanTitlePart = (value: string, maxLength: number): string => value.replace(/[\r\n\[\]]+/gu, ' ').replace(/\s+/gu, ' ').replace(/^[\s,，;；:：.!！?？-]+|[\s,，;；:：.!！?？-]+$/gu, '').trim().slice(0, maxLength).trim();
+const repositoryName = (remote?: string): string | undefined => remote?.replace(/[?#].*$/u, '').replace(/\/+$/u, '').split(/[/:]/u).at(-1)?.replace(/\.git$/iu, '');
+const titleSymptom = (value?: string): string | undefined => {
+  if (!value) return undefined;
+  const formatted = value.match(/^\s*\[[^\]\r\n]+\]-\[([^\]\r\n]+)\]\s*$/u)?.[1];
+  let symptom = cleanTitlePart(formatted ?? value, 120);
+  symptom = symptom
+    .replace(/^(?:前端|后端)?(?:项目|模块|页面|功能)?问题\s*[,，:：-]*\s*/u, '')
+    .replace(/^(?:在\s*)?[A-Za-z0-9._/-]+\s*[,，]\s*/u, '')
+    .split(/(?:预期|期望)(?:结果|行为)?\s*[,，:：]?/u, 1)[0]
+    .replace(/[。.!！?？]+$/u, '')
+    .trim();
+  return symptom.length >= 2 && !lowQualityTitlePart.test(symptom) ? symptom : undefined;
+};
+
+/** Build the persisted title from confirmed intake facts instead of trusting a
+ * provisional model/user heading. The formatter is intentionally deterministic
+ * so chat, Markdown and direct draft patches converge before submission. */
+export function normalizeBugTitle(draft: BugReportDraft): string | undefined {
+  const moduleName = cleanTitlePart(
+    draft.environmentProfile?.name
+      ?? draft.component
+      ?? repositoryName(draft.environmentProfile?.repositoryUrl)
+      ?? draft.environmentProfileId
+      ?? draft.productArea
+      ?? '',
+    120,
+  );
+  if (!moduleName || lowQualityTitlePart.test(moduleName)) return undefined;
+  const candidates = [draft.title, draft.actualBehavior, ...(draft.reproduction?.steps ?? [])];
+  const symptom = candidates.map(titleSymptom).find((value): value is string => Boolean(value));
+  return symptom ? `[${moduleName}]-[${symptom}]` : undefined;
+}
+
 const emptyEvidence = (current: BugReportDraft['evidence']): Record<string, unknown> => ({
   ...(current ?? {}), errorMessages: [...(current?.errorMessages ?? [])], stackTraces: [...(current?.stackTraces ?? [])], logs: [...(current?.logs ?? [])],
   screenshots: [...(current?.screenshots ?? [])], videos: [...(current?.videos ?? [])], networkTraces: [...(current?.networkTraces ?? [])],
@@ -790,8 +826,13 @@ export class IntakeService {
     // service boundary too. Real LLMs occasionally omit a module/repository
     // value despite the reporter having supplied it in this turn. Model facts
     // remain authoritative when both sides provide a value.
-    const normalizedUpdates = mergeDraft(extractUpdates(userText, reconciledDraft), modelTurn.fieldUpdates);
+    let normalizedUpdates = mergeDraft(extractUpdates(userText, reconciledDraft), modelTurn.fieldUpdates);
     let updatedDraft = mergeDraft(reconciledDraft, normalizedUpdates);
+    const normalizedTitle = normalizeBugTitle(updatedDraft);
+    if (normalizedTitle && normalizedTitle !== updatedDraft.title) {
+      normalizedUpdates = mergeDraft(normalizedUpdates, { title: normalizedTitle });
+      updatedDraft = mergeDraft(updatedDraft, { title: normalizedTitle });
+    }
     // Keep reporter observations/hypotheses as first-class facts without duplicating a turn
     // when a client retries the same request.
     const observations = [...(updatedDraft.observations ?? [])];

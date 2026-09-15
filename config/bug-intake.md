@@ -18,3 +18,7 @@ Before submission, collect enough information for an engineer or coding agent to
 `setupCommands` and `validationCommands` are optional. Include them only when the tester provides known, repository-appropriate commands; never invent commands or claim that an empty list proves the fix. With no configured commands, the Pi Fixer may inspect the repository and run suitable checks available there, and the Pi Reviewer evaluates the patch and evidence, but neither outcome is guaranteed.
 
 An explicit `unknown` is a valid answer. Do not repeatedly ask for information the tester cannot obtain.
+
+## Title convention
+
+Generate the title from confirmed facts using the exact format `[module-name]-[problem symptom]`. The module name must identify the affected project/module, and the problem part must concisely describe the observable failure. Do not use greetings, generic wording such as `test`, `bug`, `页面问题`, suspected root causes, or proposed fixes. If later messages make an earlier title obsolete or reveal that it was only a placeholder, replace it automatically before confirmation and submission.
