@@ -457,7 +457,7 @@ export class BugApiServer {
     } catch { return []; }
   }
   private statusFor(bug: any): string { if (typeof bug.status === 'string') return bug.status; const database = (this.repo as unknown as { database?: { prepare: (sql: string) => { get: (...args: string[]) => unknown } } }).database; if (!database) return 'DRAFT'; const row = database.prepare('SELECT status FROM bug_reports WHERE id = ? OR bug_key = ?').get(bug.id, bug.bugKey) as { status?: string } | undefined; return row?.status ?? 'DRAFT'; }
-  private dashboardItem(bug: any): Record<string, unknown> { const jobs = this.jobsFor(bug); const latest = jobs.at(-1); return { ...bug, key: bug.bugKey, target: bug.executionTarget, status: this.statusFor(bug), completeness: bug.intake?.completenessScore ?? 0, created: bug.createdAt, fixBranch: null, branch: null, job: latest ?? null, jobStatus: latest?.status ?? null }; }
+  private dashboardItem(bug: any): Record<string, unknown> { const jobs = this.jobsFor(bug); const latest = jobs.at(-1); const git = this.artifactsFor(bug.bugKey)['git-result.json'] as { branch?: string | null } | undefined; const branch = git?.branch ?? null; return { ...bug, key: bug.bugKey, target: bug.executionTarget, status: this.statusFor(bug), completeness: bug.intake?.completenessScore ?? 0, created: bug.createdAt, fixBranch: branch, branch, job: latest ?? null, jobStatus: latest?.status ?? null }; }
 
   private parseWorkerEventQuery(params: URLSearchParams): { after: number; before?: number; limit: number } | { error: string } {
     const readCursor = (name: string): number | undefined | string => {

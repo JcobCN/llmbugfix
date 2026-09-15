@@ -59,6 +59,10 @@ describe('Bug API routes', () => {
     expect((list.data.bugs[0] as { key: string }).key).toMatch(/^BUG-/);
     const filtered = await server.inject<{ bugs: unknown[] }>({ url: '/api/bugs?target=frontend&status=QUEUED' });
     expect(filtered.data.bugs).toHaveLength(1);
+    const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-api-dashboard-')); const artifactDir = path.join(artifactRoot, 'agent-results', submitted.data.bugKey); fs.mkdirSync(artifactDir, { recursive: true }); fs.writeFileSync(path.join(artifactDir, 'git-result.json'), JSON.stringify({ success: false, branch: `ai/${submitted.data.bugKey}-login-fix`, commitSha: null, mergeRequestUrl: null, pushed: false, error: 'DRY_RUN' }));
+    const dashboardServer = new BugApiServer({ DATA_ROOT: artifactRoot }, repository, new IntakeService(new FakeIntakeModel()));
+    const dashboardList = await dashboardServer.inject<{ bugs: Array<{ fixBranch: string | null; branch: string | null }> }>({ url: '/api/bugs' });
+    expect(dashboardList.data.bugs[0]).toMatchObject({ fixBranch: `ai/${submitted.data.bugKey}-login-fix`, branch: `ai/${submitted.data.bugKey}-login-fix` });
     const detail = await server.inject<{ bug: { status: string }; progress: { status: string }; messages: unknown[]; document: { content: string } }>({ url: `/api/bugs/${submitted.data.bugKey}` });
     expect(detail.status).toBe(200);
     expect(detail.data.bug.status).toBe('QUEUED');
