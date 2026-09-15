@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { RepoManager } from './index.js';
+import { RepoManager, type OwnPushTarget } from './index.js';
 
 class FakeRunner { calls: string[][] = []; cwds: string[] = []; async run(command: string, args: string[], options: any): Promise<any> { this.calls.push([command, ...args]); this.cwds.push(options.cwd); const text = args.join(' '); if (text.includes('branch --show-current')) return { command, args, exitCode: 0, stdout: 'ai/BUG-000001-fix\n', stderr: '', timedOut: false }; if (text.includes('remote get-url origin')) return { command, args, exitCode: 0, stdout: 'https://localhost/example.git\n', stderr: '', timedOut: false }; if (args[0] === 'rev-parse') return { command, args, exitCode: 0, stdout: 'abc123\n', stderr: '', timedOut: false }; return { command, args, exitCode: 0, stdout: '', stderr: '', timedOut: false }; } }
 class UntrackedRunner extends FakeRunner {
@@ -20,6 +20,31 @@ class UntrackedRunner extends FakeRunner {
 describe('RepoManager', () => {
   it('uses safe slug and rejects push on a protected/non-ai branch', async () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-repo-')); const repo = path.join(root, 'repo'); const wtRoot = path.join(root, 'worktrees'); fs.mkdirSync(path.join(repo, '.git'), { recursive: true }); fs.mkdirSync(wtRoot); const wt = path.join(wtRoot, 'BUG-000001'); fs.mkdirSync(wt); const fake = new FakeRunner(); const manager = new RepoManager({ worktreesRoot: wtRoot, repositoryRoots: [root], allowedRemoteHost: 'localhost', commandRunner: fake as any }); expect(manager.createBranchName('BUG-000001', '../../ Unsafe title!')).toBe('ai/BUG-000001-unsafe-title'); await expect(manager.commitAndPush(wt, 'main', 'bad')).rejects.toThrow(/ai|protected/); });
   it('checks branch and remote before push', async () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-repo-')); const wtRoot = path.join(root, 'worktrees'); const wt = path.join(wtRoot, 'BUG-000001'); fs.mkdirSync(path.join(wt, '.git'), { recursive: true }); const fake = new FakeRunner(); const manager = new RepoManager({ worktreesRoot: wtRoot, repositoryRoots: [root], allowedRemoteHost: 'localhost', commandRunner: fake as any }); await manager.push(wt, 'ai/BUG-000001-fix'); expect(fake.calls.some((x) => x.includes('push'))).toBe(true); });
+  it('pushes ai/* branches to the own-account private mirror instead of origin', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-repo-')); const wtRoot = path.join(root, 'worktrees'); const wt = path.join(wtRoot, 'BUG-000001'); fs.mkdirSync(path.join(wt, '.git'), { recursive: true });
+    const mirror = 'http://172.29.100.126/codigger-llm/example.git';
+    const requested: string[] = [];
+    const own: OwnPushTarget = { ensureProject: async (name) => { requested.push(name); return mirror; } };
+    let ownKnown = false;
+    const fake = new FakeRunner();
+    const runner = { async run(command: string, args: any[], options: any): Promise<any> {
+      const result = await fake.run(command, args, options);
+      if (args[0] === 'remote' && args[1] === 'get-url' && args[2] === 'own') return { command, args, exitCode: ownKnown ? 0 : 2, stdout: ownKnown ? `${mirror}\n` : '', stderr: ownKnown ? '' : "error: No such remote 'own'\n", timedOut: false };
+      return result;
+    } };
+    const manager = new RepoManager({ worktreesRoot: wtRoot, repositoryRoots: [root], allowedRemoteHost: 'localhost', commandRunner: runner as any, ownPushTarget: own });
+    await manager.push(wt, 'ai/BUG-000001-fix');
+    expect(requested).toEqual(['example']);
+    expect(fake.calls.some((call) => call.join(' ') === `git remote add own ${mirror}`)).toBe(true);
+    const pushed = fake.calls.filter((call) => call[1] === '-c' || call[1] === 'push');
+    expect(pushed.at(-1)).toEqual(['git', '-c', 'credential.helper=store', 'push', 'own', 'refs/heads/ai/BUG-000001-fix:refs/heads/ai/BUG-000001-fix']);
+    expect(fake.calls.some((call) => call.includes('origin') && call[1] === 'push')).toBe(false);
+    // a second push reuses the existing remote without re-adding it
+    ownKnown = true;
+    await manager.push(wt, 'ai/BUG-000001-fix');
+    expect(fake.calls.filter((call) => call.join(' ').startsWith('git remote add'))).toHaveLength(1);
+    expect(fake.calls.filter((call) => call[1] === '-c')).toHaveLength(2);
+  });
   it('keeps Chinese titles identifiable with an ASCII-safe branch name', () => {
     const manager = new RepoManager(fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-worktrees-')));
     const branch = manager.createBranchName('BUG-000001', '登录按钮点击无响应');

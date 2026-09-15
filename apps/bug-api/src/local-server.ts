@@ -9,7 +9,7 @@ import { EnvironmentRunner } from '@llmbugfix/environment-runner';
 import { IntakeService, OpenAICompatibleDocumentReconciler, OpenAICompatibleIntakeModel } from '@llmbugfix/intake-agent';
 import { JobQueue } from '@llmbugfix/job-queue';
 import { PiAgentRunner } from '@llmbugfix/pi-runner';
-import { RepoManager } from '@llmbugfix/repo-manager';
+import { RepoManager, GitLabPushTarget } from '@llmbugfix/repo-manager';
 import { createLogger, parseConfig, parseWeeklyEmailConfig } from '@llmbugfix/shared';
 import { CommandRunner, Validator } from '@llmbugfix/validator';
 import { Orchestrator } from '@llmbugfix/orchestrator';
@@ -99,7 +99,16 @@ if (llmEnabled) {
   const repositoriesRoot = path.resolve(config.DATA_ROOT, 'repositories');
   const repositories = profiles.map((profile) => profile.repository);
   const allowedRemoteHosts = (process.env.GIT_ALLOWED_HOSTS ?? '').split(',').map((h) => h.trim()).filter(Boolean);
-  const repoManager = new RepoManager({ worktreesRoot, repositoryRoots: repositories, cloneRoot: repositoriesRoot, allowedRemoteHosts });
+  // ai/* fix branches are mirrored into a private project under the own
+  // GitLab account (docs/gitlab-private-repo-api.md). GITLAB_URL defaults to
+  // the internal instance; set it to an empty string to push to origin instead.
+  const gitlabUrl = process.env.GITLAB_URL !== undefined ? process.env.GITLAB_URL.trim() : 'http://172.29.100.126';
+  const ownPushTarget = gitlabUrl ? new GitLabPushTarget({
+    baseUrl: gitlabUrl,
+    account: process.env.GITLAB_ACCOUNT?.trim() || 'codigger-llm',
+    password: process.env.GITLAB_PASSWORD?.trim() || 'Engine#llm',
+  }) : undefined;
+  const repoManager = new RepoManager({ worktreesRoot, repositoryRoots: repositories, cloneRoot: repositoriesRoot, allowedRemoteHosts, ownPushTarget });
   for (const repository of repositories) repoManager.validateRepoUrl(repository);
   const validBranch = (value: string): boolean => /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/u.test(value) && !value.includes('..') && !value.includes('//') && !value.endsWith('/');
   environments = {

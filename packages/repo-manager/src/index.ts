@@ -2,8 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { CommandRunner } from '@llmbugfix/validator';
+import { mirrorProjectName } from './gitlab.js';
 
-export interface RepoManagerOptions { worktreesRoot?: string; worktreeRoot?: string; repositoryRoot?: string; repositoryRoots?: string[]; /** Root used for remote repositories cloned from confirmed intake. */ cloneRoot?: string; allowedRemoteHost?: string; allowedRemoteHosts?: string[]; protectedBranches?: string[]; commandRunner?: CommandRunner; }
+export { GitLabPushTarget, mirrorProjectName } from './gitlab.js';
+export type { GitLabPushTargetOptions } from './gitlab.js';
+
+/** Creates/looks up the own-account private mirror project for a source remote. */
+export interface OwnPushTarget { ensureProject(name: string): Promise<string>; }
+
+export interface RepoManagerOptions { worktreesRoot?: string; worktreeRoot?: string; repositoryRoot?: string; repositoryRoots?: string[]; /** Root used for remote repositories cloned from confirmed intake. */ cloneRoot?: string; allowedRemoteHost?: string; allowedRemoteHosts?: string[]; protectedBranches?: string[]; commandRunner?: CommandRunner; /** When set, ai/* branches are pushed to an own-account private mirror instead of origin. */ ownPushTarget?: OwnPushTarget; }
 export interface GitOperationResult { exitCode: number; stdout: string; stderr: string; timedOut: boolean; }
 const within = (root: string, value: string) => value === root || value.startsWith(`${root}${path.sep}`);
 const BUG = /^BUG-[0-9]{6,}$/;
@@ -14,6 +21,7 @@ export class RepoManager {
   private readonly cloneRoot?: string;
   private readonly allowedRemoteHosts: string[];
   private readonly protectedBranches: string[];
+  private readonly ownPushTarget?: OwnPushTarget;
   private readonly runner: CommandRunner;
   constructor(worktreesRootOrOptions: string | RepoManagerOptions, allowedHosts: string[] = []) {
     const options: RepoManagerOptions = typeof worktreesRootOrOptions === 'string' ? { worktreesRoot: worktreesRootOrOptions, allowedRemoteHosts: allowedHosts } : worktreesRootOrOptions;
@@ -23,6 +31,7 @@ export class RepoManager {
     this.repositoryRoots = [...(options.repositoryRoots ?? (options.repositoryRoot ? [options.repositoryRoot] : [])), ...(this.cloneRoot ? [this.cloneRoot] : [])].map((root) => { const resolved = path.resolve(root); return fs.existsSync(resolved) ? fs.realpathSync.native(resolved) : resolved; });
     this.allowedRemoteHosts = options.allowedRemoteHosts ?? (options.allowedRemoteHost ? [options.allowedRemoteHost] : []);
     this.protectedBranches = options.protectedBranches ?? ['main', 'master', 'develop', 'release'];
+    this.ownPushTarget = options.ownPushTarget;
     this.runner = options.commandRunner ?? new CommandRunner({ allowedCwdRoots: this.repositoryRoots.length ? [this.worktreesRoot, ...this.repositoryRoots] : [] });
   }
   private repoPath(repo: string): string { const resolved = path.resolve(repo); if (!fs.existsSync(resolved)) throw new Error(`Repository does not exist: ${repo}`); const real = fs.realpathSync.native(resolved); if (!fs.statSync(real).isDirectory() || !fs.existsSync(path.join(real, '.git'))) throw new Error(`Not a git repository: ${repo}`); if (this.repositoryRoots.length && !this.repositoryRoots.some((root) => within(root, real))) throw new Error(`Repository is outside configured roots: ${repo}`); return real; }
@@ -164,7 +173,44 @@ export class RepoManager {
   private remoteHost(remote: string): string { try { const normalized = remote.startsWith('git@') ? `ssh://${remote.replace(':', '/')}` : remote; const parsed = new URL(normalized); if (!parsed.hostname) throw new Error('missing host'); return parsed.hostname.toLowerCase(); } catch { throw new Error(`Invalid remote URL: ${remote}`); } }
   private async assertPushSafe(worktreePath: string, branchName: string): Promise<void> { if (!/^ai\/[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branchName) || branchName.includes('..') || branchName.includes('//')) throw new Error(`Only safe ai/* branches may be pushed: ${branchName}`); const leaf = branchName.slice(3); if (this.protectedBranches.some((item) => leaf === item || leaf.startsWith(`${item}/`)) || ['main', 'master', 'develop'].includes(branchName)) throw new Error(`Protected branch cannot be pushed: ${branchName}`); const current = await this.git(worktreePath, ['branch', '--show-current']); if (current.exitCode !== 0 || current.stdout.trim() !== branchName) throw new Error('Current branch does not match requested branch'); const remote = await this.git(worktreePath, ['remote', 'get-url', 'origin']); if (remote.exitCode !== 0) throw new Error('origin remote is required'); const host = this.remoteHost(remote.stdout.trim()); if (this.allowedRemoteHosts.length && !this.allowedRemoteHosts.includes(host)) throw new Error(`Remote host is not allowed: ${host}`); }
   async commit(worktreePath: string, message: string): Promise<string> { const cwd = this.checkedWorktree(worktreePath); const add = await this.git(cwd, ['add', '--all']); if (add.exitCode !== 0) throw new Error(add.stderr); const commit = await this.git(cwd, ['commit', '-m', message]); if (commit.exitCode !== 0) throw new Error(commit.stderr); const rev = await this.git(cwd, ['rev-parse', 'HEAD']); if (rev.exitCode !== 0) throw new Error(rev.stderr); return rev.stdout.trim(); }
-  async push(worktreePath: string, branchName: string): Promise<void> { const cwd = this.checkedWorktree(worktreePath); await this.assertPushSafe(cwd, branchName); const result = await this.git(cwd, ['push', '--set-upstream', 'origin', branchName]); if (result.exitCode !== 0) throw new Error(result.stderr); }
+  /**
+   * Ensure a remote named `own` points at the private mirror of the source
+   * repository under the configured own account, creating the GitLab project
+   * when it does not exist yet (see docs/gitlab-private-repo-api.md).
+   */
+  private async ensureOwnRemote(cwd: string): Promise<string> {
+    const origin = await this.git(cwd, ['remote', 'get-url', 'origin']);
+    if (origin.exitCode !== 0) throw new Error('origin remote is required');
+    const url = await this.ownPushTarget!.ensureProject(mirrorProjectName(origin.stdout.trim()));
+    const existing = await this.git(cwd, ['remote', 'get-url', 'own']);
+    if (existing.exitCode === 0) {
+      if (existing.stdout.trim() === url) return 'own';
+      const updated = await this.git(cwd, ['remote', 'set-url', 'own', url]);
+      if (updated.exitCode !== 0) throw new Error(updated.stderr || 'Unable to repoint the own-account push remote');
+      return 'own';
+    }
+    const added = await this.git(cwd, ['remote', 'add', 'own', url]);
+    if (added.exitCode !== 0) {
+      // a concurrent push on the same clone may have added it first
+      const retry = await this.git(cwd, ['remote', 'get-url', 'own']);
+      if (retry.exitCode !== 0 || retry.stdout.trim() !== url) throw new Error(added.stderr || 'Unable to add the own-account push remote');
+    }
+    return 'own';
+  }
+  async push(worktreePath: string, branchName: string): Promise<void> {
+    const cwd = this.checkedWorktree(worktreePath);
+    await this.assertPushSafe(cwd, branchName);
+    if (!this.ownPushTarget) {
+      const result = await this.git(cwd, ['push', '--set-upstream', 'origin', branchName]);
+      if (result.exitCode !== 0) throw new Error(result.stderr);
+      return;
+    }
+    const remote = await this.ensureOwnRemote(cwd);
+    // credential.helper=store keeps the push passwordless even when the global
+    // git config has no helper configured; the PAT lives in ~/.git-credentials.
+    const result = await this.git(cwd, ['-c', 'credential.helper=store', 'push', remote, `refs/heads/${branchName}:refs/heads/${branchName}`]);
+    if (result.exitCode !== 0) throw new Error(result.stderr);
+  }
   async commitAndPush(worktreePath: string, branchName: string, message: string, dryRun = false): Promise<{ commitSha: string | null; pushed: boolean }> { const cwd = this.checkedWorktree(worktreePath); if (dryRun) { const rev = await this.git(cwd, ['rev-parse', 'HEAD']); return { commitSha: rev.exitCode === 0 ? rev.stdout.trim() : null, pushed: false }; } await this.assertPushSafe(cwd, branchName); const sha = await this.commit(cwd, message); await this.push(cwd, branchName); return { commitSha: sha, pushed: true }; }
   private looseWorktreePath(value: string): string {
     const resolved = path.resolve(value); if (!within(this.worktreesRoot, resolved)) throw new Error(`Worktree is outside configured root: ${value}`); return resolved;
