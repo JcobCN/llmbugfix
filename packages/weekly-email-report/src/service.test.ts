@@ -52,7 +52,7 @@ describe('weekly report generation', () => {
       expect(() => service.generate('2026-09-07T00:00:00+08:00', '2026-09-12T09:00:00+08:00')).toThrow(WeeklyReportContractError);
     }
     const empty = new DefaultWeeklyReportService({ readWeeklyReportRows: () => [] }).generate('2026-09-07T00:00:00+08:00', '2026-09-12T09:00:00+08:00');
-    expect(renderWeeklyReport(empty).text).toContain('本周无 Bug 修复进展');
+    expect(renderWeeklyReport(empty).text).toContain('本周无开发任务进展');
   });
 
   it('truncates by Unicode code point with an explicit marker', () => {

@@ -12,6 +12,13 @@ export const CORE_QUESTIONS: readonly InterviewQuestion[] = [
   { field: 'environmentProfile.name', text: '这个问题所属的项目或模块名称是什么？', importance: 'critical' },
   { field: 'environmentProfile.repositoryUrl', text: '这个问题所在项目的 Git 仓库远程地址是什么？请提供 HTTPS 或 SSH clone 地址。', importance: 'critical' },
 ];
+export const DEVELOPMENT_CORE_QUESTIONS: readonly InterviewQuestion[] = [
+  { field: 'objective', text: '希望新增或改造什么能力？请描述这项开发任务的目标。', importance: 'critical' },
+  { field: 'requirements', text: '这项开发任务必须实现哪些具体需求？', importance: 'critical' },
+  { field: 'acceptanceCriteria', text: '完成后如何验收？请给出至少一条可验证的验收标准。', importance: 'critical' },
+  { field: 'environmentProfile.name', text: '这项任务所属的项目或模块名称是什么？', importance: 'critical' },
+  { field: 'environmentProfile.repositoryUrl', text: '这项任务所在项目的 Git 仓库远程地址是什么？请提供 HTTPS 或 SSH clone 地址。', importance: 'critical' },
+];
 const read = (draft: BugReportDraft, path: string): unknown => {
   let value: unknown = draft;
   for (const part of path.split('.')) {
@@ -46,6 +53,7 @@ export function hasGitRepositoryAddress(draft: BugReportDraft): boolean {
 export function hasCoreSubmissionInformation(draft: BugReportDraft): boolean {
   const hasKnownProfile = known(draft.environmentProfileId);
   const hasModule = hasKnownProfile || known(draft.environmentProfile?.name) || known(draft.component) || known(draft.productArea);
+  if (draft.taskType === 'development') return known(draft.objective) && known(draft.requirements) && known(draft.acceptanceCriteria) && hasModule && hasGitRepositoryAddress(draft);
   return known(draft.actualBehavior) && known(draft.expectedBehavior) && hasModule && hasGitRepositoryAddress(draft);
 }
 
@@ -64,7 +72,7 @@ export function questionStrategy(draft: BugReportDraft, askedFields: readonly st
   // Keep the parameter for conversation/API compatibility. Required fields
   // remain askable when a previous answer was empty or explicitly unknown.
   void askedFields;
-  const candidates = CORE_QUESTIONS;
+  const candidates = draft.taskType === 'development' ? DEVELOPMENT_CORE_QUESTIONS : CORE_QUESTIONS;
   const unique = new Set<string>();
   return candidates.filter((question) => {
     // A prior question only suppresses a field after it has a meaningful
@@ -81,6 +89,26 @@ export const getAdaptiveQuestions = questionStrategy;
 export function evaluateCompleteness(draft: BugReportDraft): CompletenessEvaluation {
   let problem = 0; let reproduction = 0; let environment = 0; let evidence = 0; let impact = 0;
   const missing: string[] = [];
+  if (draft.taskType === 'development') {
+    let objective = 0; let requirements = 0; let acceptance = 0; let scope = 0;
+    if (known(draft.objective)) objective = 25; else missing.push('objective');
+    if (known(draft.requirements)) requirements = 25; else missing.push('requirements');
+    if (known(draft.acceptanceCriteria)) acceptance = 25; else missing.push('acceptanceCriteria');
+    if ((draft.nonGoals?.length ?? 0) > 0) scope += 5;
+    if ((draft.constraints?.length ?? 0) > 0) scope += 5;
+    const moduleKnown = known(draft.environmentProfileId) || known(draft.environmentProfile?.name) || known(draft.component) || known(draft.productArea);
+    const repositoryKnown = hasGitRepositoryAddress(draft);
+    if (!moduleKnown) missing.push('environmentProfile.name');
+    if (!repositoryKnown) missing.push('environmentProfile.repositoryUrl');
+    if (draft.executionTarget && draft.executionTarget !== 'unknown') environment += 7;
+    if (repositoryKnown) environment += 4;
+    if (moduleKnown) environment += 4;
+    const rawScore = objective + requirements + acceptance + scope + environment;
+    const coreReady = hasCoreSubmissionInformation(draft);
+    const score = coreReady ? Math.max(rawScore, 65) : Math.min(rawScore, 64);
+    const missingList = [...new Set(missing)];
+    return { score, dimensions: { problem: 0, reproduction: 0, environment, evidence: 0, impact: 0, objective, requirements, acceptance, scope }, missingCriticalInformation: missingList, recommendedQuestions: questionStrategy(draft).map((q) => q.text), readyForSubmission: coreReady, readyForConfirmation: coreReady };
+  }
   if (known(draft.actualBehavior)) problem += 15; else missing.push('actualBehavior');
   if (known(draft.expectedBehavior)) problem += 10; else missing.push('expectedBehavior');
   const moduleKnown = known(draft.environmentProfileId) || known(draft.environmentProfile?.name) || known(draft.component) || known(draft.productArea);

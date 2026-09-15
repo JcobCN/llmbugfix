@@ -201,7 +201,7 @@ describe('conversational intake page', () => {
 
     const rootRoute = resolveWebRoute('/');
     expect(rootRoute?.contentType).toBe('text/html; charset=utf-8');
-    expect(rootRoute?.body).toContain('Bug Intake');
+    expect(rootRoute?.body).toContain('Development Task Intake');
 
     const dashRoute = resolveWebRoute('/dashboard');
     expect(dashRoute?.contentType).toBe('text/html; charset=utf-8');
@@ -246,10 +246,10 @@ describe('conversational intake page', () => {
     expect(html).toContain('>Dashboard</a>');
     expect(html).toContain('id="success-card"');
     expect(html).toContain('role="status"');
-    expect(html).toContain('<h2>Bug 已提交</h2>');
+    expect(html).toContain('<h2>任务已提交</h2>');
     expect(html).toContain('id="bug-key-link"');
     expect(html).toContain('id="bug-detail-link"');
-    expect(clientScripts.intake).toContain("$('state').textContent = '已提交 ' + (bugKey || 'Bug')");
+    expect(clientScripts.intake).toContain("$('state').textContent = '已提交 ' + (bugKey || '任务')");
     expect(html).toContain('查看 Bug 详情');
     expect(html).toContain('前往 Dashboard');
     expect(html).toContain('创建新报告');
@@ -267,8 +267,8 @@ describe('conversational intake page', () => {
     expect(clientScripts.intake).toContain("if (pageState === 'submitted' || pageState === 'busy'");
     expect(clientScripts.intake).toContain("if (pageState !== 'submitted') setPageState('ready');");
     expect(clientScripts.intake).toContain('clearTimeout(saveTimer);\n    saveTimer = null;\n    localDirty = false;');
-    expect(clientScripts.intake).toContain('若当前服务已配置 repair worker');
-    expect(clientScripts.intake).toContain('查看实时状态和修复结果');
+    expect(clientScripts.intake).toContain('若当前服务已配置 worker');
+    expect(clientScripts.intake).toContain('查看实时状态和实现结果');
     expect(clientScripts.intake).toContain('报告已创建，但信息仍不充分');
     expect(clientScripts.intake).toContain('body: JSON.stringify({ confirm: true })');
   });

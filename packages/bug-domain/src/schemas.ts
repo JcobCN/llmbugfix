@@ -8,6 +8,8 @@ export const BugTypeSchema = z.enum(['functional', 'ui', 'api', 'crash', 'perfor
 export type BugType = z.infer<typeof BugTypeSchema>;
 export const ExecutionTargetSchema = z.enum(['frontend', 'backend', 'unknown']);
 export type ExecutionTarget = z.infer<typeof ExecutionTargetSchema>;
+export const TaskTypeSchema = z.enum(['bugfix', 'development']);
+export type TaskType = z.infer<typeof TaskTypeSchema>;
 /**
  * Facts collected during intake for a project which does not yet have a
  * checked-in environment profile.  This is intentionally part of the draft
@@ -59,9 +61,11 @@ const evidenceSchema = z.object({
 });
 
 export const BugReportSchema = z.object({
-  id, bugKey: z.string().regex(/^BUG-[0-9]{6,}$/), title: z.string().min(1), productArea: nullableString, component: nullableString,
+  id, bugKey: z.string().regex(/^BUG-[0-9]{6,}$/), taskType: TaskTypeSchema.default('bugfix'), title: z.string().min(1), productArea: nullableString, component: nullableString,
   bugType: BugTypeSchema, executionTarget: ExecutionTargetSchema, environmentProfileId: z.string().min(1).nullable(),
-  severity: z.enum(['low', 'medium', 'high', 'critical', 'unknown']), actualBehavior: z.string().min(1), expectedBehavior: nullableString,
+  severity: z.enum(['low', 'medium', 'high', 'critical', 'unknown']), actualBehavior: z.string().default(''), expectedBehavior: nullableString,
+  objective: nullableString.default(null), requirements: z.array(z.string().min(1)).default([]), acceptanceCriteria: z.array(z.string().min(1)).default([]),
+  nonGoals: z.array(z.string().min(1)).default([]), constraints: z.array(z.string().min(1)).default([]), referenceContext: z.array(z.string().min(1)).default([]),
   reproduction: reproductionSchema, environment: environmentSchema, evidence: evidenceSchema,
   impact: z.object({ affectedUsers: nullableString, scope: z.enum(['single_user', 'some_users', 'all_users', 'unknown']), blocksTesting: z.boolean().nullable(), workaroundExists: z.boolean().nullable(), workaround: nullableString }),
   regression: z.object({ isRegression: z.boolean().nullable(), lastKnownGoodVersion: nullableString, suspectedVersion: nullableString }),
@@ -85,7 +89,7 @@ export type ConversationMessage = z.infer<typeof ConversationMessageSchema>;
 export const BugConversationSchema = z.object({ id, reporterId: id, status: ConversationStatusSchema, draft: BugReportDraftSchema, completeness: z.lazy(() => CompletenessEvaluationSchema), createdAt: iso, updatedAt: iso });
 export type BugConversation = z.infer<typeof BugConversationSchema>;
 
-export const CompletenessEvaluationSchema = z.object({ score: z.number().min(0).max(100), dimensions: z.object({ problem: z.number().min(0).max(25), reproduction: z.number().min(0).max(30), environment: z.number().min(0).max(15), evidence: z.number().min(0).max(20), impact: z.number().min(0).max(10) }), missingCriticalInformation: z.array(z.string()), recommendedQuestions: z.array(z.string()), readyForSubmission: z.boolean(), readyForConfirmation: z.boolean().optional() });
+export const CompletenessEvaluationSchema = z.object({ score: z.number().min(0).max(100), dimensions: z.object({ problem: z.number().min(0).max(25), reproduction: z.number().min(0).max(30), environment: z.number().min(0).max(15), evidence: z.number().min(0).max(20), impact: z.number().min(0).max(10), objective: z.number().min(0).max(25).optional(), requirements: z.number().min(0).max(25).optional(), acceptance: z.number().min(0).max(25).optional(), scope: z.number().min(0).max(10).optional() }), missingCriticalInformation: z.array(z.string()), recommendedQuestions: z.array(z.string()), readyForSubmission: z.boolean(), readyForConfirmation: z.boolean().optional() });
 export type CompletenessEvaluation = z.infer<typeof CompletenessEvaluationSchema>;
 
 export const JobStatusSchema = z.enum(['QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED']);
@@ -100,8 +104,18 @@ export type AgentRun = z.infer<typeof AgentRunSchema>;
 export const BugFixTaskSchema = z.object({ bugKey: z.string().regex(/^BUG-[0-9]{6,}$/), title: z.string().min(1), executionTarget: z.enum(['frontend', 'backend']), environmentProfileId: z.string().min(1), actualBehavior: z.string().min(1), expectedBehavior: nullableString, reproductionSteps: z.array(z.string()), prerequisites: z.array(z.string()), environment: z.record(z.unknown()), errorMessages: z.array(z.string()), stackTraces: z.array(z.string()), attachments: z.array(AttachmentRefSchema), lastKnownGoodVersion: nullableString, failingVersion: nullableString, reporterObservations: z.array(z.string()), reporterHypotheses: z.array(z.string()), machineObservations: z.array(z.string()), missingInformation: z.array(z.string()), completenessScore: z.number().min(0).max(100) });
 export type BugFixTask = z.infer<typeof BugFixTaskSchema>;
 
+const CodingTaskBaseSchema = z.object({ bugKey: z.string().regex(/^BUG-[0-9]{6,}$/), title: z.string().min(1), executionTarget: z.enum(['frontend', 'backend']), environmentProfileId: z.string().min(1), environment: z.record(z.unknown()), attachments: z.array(AttachmentRefSchema), reporterObservations: z.array(z.string()), machineObservations: z.array(z.string()), missingInformation: z.array(z.string()), completenessScore: z.number().min(0).max(100) });
+export const CodingTaskSchema = z.discriminatedUnion('taskType', [
+  CodingTaskBaseSchema.extend({ taskType: z.literal('bugfix'), actualBehavior: z.string().min(1), expectedBehavior: nullableString, reproductionSteps: z.array(z.string()), prerequisites: z.array(z.string()), errorMessages: z.array(z.string()), stackTraces: z.array(z.string()), lastKnownGoodVersion: nullableString, failingVersion: nullableString, reporterHypotheses: z.array(z.string()) }),
+  CodingTaskBaseSchema.extend({ taskType: z.literal('development'), objective: z.string().min(1), requirements: z.array(z.string().min(1)).min(1), acceptanceCriteria: z.array(z.string().min(1)).min(1), nonGoals: z.array(z.string().min(1)), constraints: z.array(z.string().min(1)), referenceContext: z.array(z.string().min(1)) }),
+]);
+export type CodingTask = z.infer<typeof CodingTaskSchema>;
+
 export const AgentFixResultSchema = z.object({ bugKey: z.string().regex(/^BUG-[0-9]{6,}$/), status: z.enum(['fixed', 'blocked', 'not_reproducible', 'failed']), confidence: z.number().min(0).max(1), summary: z.string(), rootCause: nullableString, reproduced: z.boolean(), regressionTestAdded: z.boolean(), filesChanged: z.array(z.string()), riskNotes: z.array(z.string()), blockedReason: nullableString, missingInformation: z.array(z.string()) });
 export type AgentFixResult = z.infer<typeof AgentFixResultSchema>;
+
+export const AgentTaskResultSchema = z.object({ bugKey: z.string().regex(/^BUG-[0-9]{6,}$/), taskType: TaskTypeSchema, status: z.enum(['completed', 'blocked', 'failed']), confidence: z.number().min(0).max(1), summary: z.string(), filesChanged: z.array(z.string()), validationNotes: z.array(z.string()).default([]), riskNotes: z.array(z.string()), blockedReason: nullableString, missingInformation: z.array(z.string()), bugfixDetails: z.object({ rootCause: nullableString, reproduced: z.boolean(), regressionTestAdded: z.boolean() }).optional(), developmentDetails: z.object({ requirementsAddressed: z.array(z.string()), acceptanceCriteriaAddressed: z.array(z.string()), designNotes: z.array(z.string()) }).optional() }).superRefine((value, ctx) => { if (value.taskType === 'bugfix' && !value.bugfixDetails) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['bugfixDetails'], message: 'bugfixDetails is required for bugfix tasks' }); if (value.taskType === 'development' && !value.developmentDetails) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['developmentDetails'], message: 'developmentDetails is required for development tasks' }); });
+export type AgentTaskResult = z.infer<typeof AgentTaskResultSchema>;
 
 /** Metadata for a non-authoritative patch that survived fixer failure/timeout. */
 export const FixCandidateMetadataSchema = z.object({
@@ -117,7 +131,7 @@ export type FixCandidateMetadata = z.infer<typeof FixCandidateMetadataSchema>;
 
 export const ValidationResultSchema = z.object({ passed: z.boolean(), commands: z.array(z.string()), results: z.array(z.object({ command: z.string(), exitCode: z.number().int(), passed: z.boolean(), output: z.string() })), summary: z.string().default(''), artifacts: z.array(z.string()).default([]) });
 export type ValidationResult = z.infer<typeof ValidationResultSchema>;
-export const ReviewResultSchema = z.object({ verdict: z.enum(['approve', 'reject']), bugAddressed: z.boolean(), regressionRisk: z.enum(['low', 'medium', 'high']), summary: z.string(), findings: z.array(z.string()).default([]) });
+export const ReviewResultSchema = z.object({ verdict: z.enum(['approve', 'reject']), bugAddressed: z.boolean().optional(), taskAddressed: z.boolean().optional(), acceptanceCriteriaMet: z.array(z.object({ criterion: z.string(), met: z.boolean(), evidence: z.string() })).optional(), regressionRisk: z.enum(['low', 'medium', 'high']), summary: z.string(), findings: z.array(z.string()).default([]) });
 export type ReviewResult = z.infer<typeof ReviewResultSchema>;
 export const GitResultSchema = z.object({ success: z.boolean(), branch: nullableString, commitSha: nullableString, mergeRequestUrl: nullableString, pushed: z.boolean(), error: nullableString });
 export type GitResult = z.infer<typeof GitResultSchema>;
@@ -136,6 +150,8 @@ export const jobSchema = JobSchema;
 export const agentRunSchema = AgentRunSchema;
 export const bugFixTaskSchema = BugFixTaskSchema;
 export const agentFixResultSchema = AgentFixResultSchema;
+export const codingTaskSchema = CodingTaskSchema;
+export const agentTaskResultSchema = AgentTaskResultSchema;
 export const fixCandidateMetadataSchema = FixCandidateMetadataSchema;
 export const validationResultSchema = ValidationResultSchema;
 export const reviewResultSchema = ReviewResultSchema;

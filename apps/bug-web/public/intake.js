@@ -8,6 +8,7 @@
   let saving = null;
   let pageState = 'loading';
   let submissionReady = false;
+  let taskType = 'bugfix';
 
   const $ = (id) => document.getElementById(id);
   const showError = (message) => {
@@ -274,7 +275,7 @@
       const created = await api('/api/bugs/conversations', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: '{}'
+        body: JSON.stringify({ taskType })
       });
       if (!created || !created.id) throw Error('Conversation id was not returned');
       id = created.id;
@@ -338,13 +339,13 @@
     const completeness = result.completeness || {};
     const score = completeness.score ?? (bug.intake && bug.intake.completenessScore) ?? 0;
     const detailUrl = '/bugs/' + encodeURIComponent(bugKey);
-    $('bug-key').textContent = bugKey || '未返回 Bug Key';
+    $('bug-key').textContent = bugKey || '未返回任务编号';
     $('bug-key-link').href = detailUrl;
     $('bug-detail-link').href = detailUrl;
     $('submitted-status').textContent = status;
     $('submitted-score').textContent = String(score) + '/100';
     if (status === 'QUEUED') {
-      $('submitted-explanation').textContent = '已进入修复队列。若当前服务已配置 repair worker，它会自动开始处理；请在详情页查看实时状态和修复结果。';
+      $('submitted-explanation').textContent = '已进入实现队列。若当前服务已配置 worker，它会自动开始处理；请在详情页查看实时状态和实现结果。';
     } else if (status === 'NEEDS_INFO') {
       $('submitted-explanation').textContent = '报告已创建，但信息仍不充分；请查看 Bug 详情了解还需要补充的内容。';
     } else {
@@ -352,7 +353,7 @@
     }
     $('success-card').hidden = false;
     setPageState('submitted');
-    $('state').textContent = '已提交 ' + (bugKey || 'Bug');
+    $('state').textContent = '已提交 ' + (bugKey || '任务');
     showError('');
   }
   async function submit() {
@@ -361,7 +362,7 @@
       renderSubmissionFailure({ message: '请先补齐页面列出的关键缺失信息。', data: { code: 'INTAKE_INCOMPLETE', completeness: conversation && conversation.completeness } });
       return;
     }
-    if (!confirm('确认提交会创建正式 Bug。请确认 Markdown 报告内容无误后继续。')) return;
+    if (!confirm('确认提交会创建正式任务。请确认 Markdown 报告内容无误后继续。')) return;
     setPageState('busy', 'submit');
     try {
       await flushDocument();
@@ -393,6 +394,7 @@
   $('retry-init').onclick = () => { void init(); };
   $('send').onclick = () => { void send(); };
   $('submit').onclick = () => { void submit(); };
+  ['bugfix', 'development'].forEach((value) => { const input = $('task-type-' + value); if (!input) return; input.onchange = () => { taskType = value; $('message').placeholder = taskType === 'development' ? '请描述开发目标、具体需求和验收标准…' : '请直接描述你遇到的问题…'; void init(); }; });
   $('continue').onclick = () => { if (pageState === 'ready') $('message').focus(); };
   $('message').onkeydown = (event) => {
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {

@@ -2,6 +2,8 @@
 
 The minimum handoff contract is four facts: what actually happened, what should have happened, the project/module name, and the project's Git remote clone URL. Every report must include the remote URL (HTTPS or SSH) in the current draft. An existing project profile or its internal ID may identify the project/module, but it never satisfies or replaces the repository URL requirement. Do not ask for a local repository filesystem path. The service uses the confirmed remote to clone into `DATA_ROOT/repositories` and generates the runnable profile in `DATA_ROOT/generated-environments.yaml` after the tester submits the report.
 
+For development work, set `taskType=development`. Its minimum handoff contract is the objective, one or more concrete requirements, at least one verifiable acceptance criterion, the project/module name, and the Git remote. Do not require the reporter to invent actual behavior, reproduction steps, or a root cause for new work.
+
 Frontend/backend target, default branch, reproduction steps, route, browser/version, logs, screenshots, impact and other environment details are useful enhancements. Ask for them only when helpful, and never block confirmation or FixWorker handoff when the four minimum facts are present. If a dynamic environment must be provisioned, the service may still require a target/profile at submission time.
 
 Before submission, collect enough information for an engineer or coding agent to act:

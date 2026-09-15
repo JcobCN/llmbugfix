@@ -3,9 +3,12 @@ import path from 'node:path';
 import { newId } from '@llmbugfix/shared';
 import {
   AgentFixResultSchema,
+  AgentTaskResultSchema,
   BugFixTaskSchema,
+  CodingTaskSchema,
   ReviewResultSchema,
   type BugFixTask,
+  type CodingTask,
 } from '@llmbugfix/bug-domain';
 import {
   EnvironmentProfileSchema,
@@ -34,8 +37,10 @@ import {
 import { z } from 'zod';
 
 const StrictFixResultSchema = AgentFixResultSchema.strict();
+const StrictTaskResultSchema = AgentTaskResultSchema;
 const StrictReviewResultSchema = ReviewResultSchema.strict();
 export type AgentFixResultChecked = z.infer<typeof StrictFixResultSchema>;
+export type AgentTaskResultChecked = z.infer<typeof StrictTaskResultSchema>;
 export type ReviewResultChecked = z.infer<typeof StrictReviewResultSchema>;
 
 /** A bounded, structured execution event. It intentionally contains no model
@@ -88,7 +93,7 @@ export interface FixerInput {
 
 export interface ReviewerInput {
   worktreePath: string;
-  task: BugFixTask;
+  task: BugFixTask | CodingTask;
   profile: EnvironmentProfile;
   diff: string;
   filesChanged: string[];
@@ -99,6 +104,7 @@ export interface ReviewerInput {
 
 export interface AgentRunner {
   runFixer(input: FixerInput): Promise<AgentFixResultChecked>;
+  runCoder?(input: Omit<FixerInput, 'task'> & { task: CodingTask }): Promise<AgentTaskResultChecked>;
   runReviewer(input: ReviewerInput): Promise<ReviewResultChecked>;
 }
 
@@ -426,11 +432,23 @@ function fixerPrompt(input: FixerInput, safety: string): string {
   ].join('\n\n');
 }
 
-function reviewerPrompt(input: ReviewerInput): string {
+function coderPrompt(input: Omit<FixerInput, 'task'> & { task: CodingTask }, safety: string): string {
   return [
-    'Review the proposed bug fix in the current repository. You are read-only: inspect files and the supplied evidence, but do not modify files or run commands.',
+    'Implement the requested development task in the current repository. Inspect the existing architecture and conventions, then make the smallest complete change satisfying every acceptance criterion.',
+    `Safety policy: ${safety}`,
+    'Do not push, merge, deploy, access production, download dependencies, or expand into declared non-goals.',
+    'If an ambiguity would materially change product behavior, return blocked with missingInformation instead of guessing.',
+    'When complete, reply with exactly one JSON object and no prose. Required fields: bugKey, taskType (development), status (completed|blocked|failed), confidence, summary, filesChanged, validationNotes, riskNotes, blockedReason, missingInformation, developmentDetails { requirementsAddressed, acceptanceCriteriaAddressed, designNotes }.',
+    'Task and context:\n' + asJson({ task: input.task, profile: input.profile, docs: input.docs ?? [], skills: input.skills ?? [], attachments: input.attachments ?? [] }),
+  ].join('\n\n');
+}
+
+function reviewerPrompt(input: ReviewerInput): string {
+  const development = 'taskType' in input.task && input.task.taskType === 'development';
+  return [
+    development ? 'Review the proposed development change against every requirement, acceptance criterion, non-goal, repository convention, and regression risk. You are read-only: inspect files and supplied evidence, but do not modify files or run commands.' : 'Review the proposed bug fix in the current repository. You are read-only: inspect files and the supplied evidence, but do not modify files or run commands.',
     'When finished, reply with exactly one JSON object (a single fenced ```json block is also accepted) and no surrounding prose.',
-    'The JSON must contain: verdict (approve|reject), bugAddressed, regressionRisk (low|medium|high), summary, findings.',
+    development ? 'The JSON must contain: verdict (approve|reject), taskAddressed, acceptanceCriteriaMet (array of {criterion, met, evidence}), regressionRisk (low|medium|high), summary, findings.' : 'The JSON must contain: verdict (approve|reject), bugAddressed, regressionRisk (low|medium|high), summary, findings.',
     `Review evidence:\n${asJson({ task: input.task, profile: input.profile, diff: input.diff, filesChanged: input.filesChanged, validation: input.validation })}`,
   ].join('\n\n');
 }
@@ -792,8 +810,20 @@ export class PiAgentRunner implements AgentRunner {
     return result;
   }
 
+  async runCoder(input: Omit<FixerInput, 'task'> & { task: CodingTask }): Promise<AgentTaskResultChecked> {
+    const task = CodingTaskSchema.parse(input.task);
+    if (task.taskType === 'bugfix') {
+      const legacy = await this.runFixer({ ...input, task });
+      return StrictTaskResultSchema.parse({ bugKey: legacy.bugKey, taskType: 'bugfix', status: legacy.status === 'fixed' ? 'completed' : legacy.status === 'failed' ? 'failed' : 'blocked', confidence: legacy.confidence, summary: legacy.summary, filesChanged: legacy.filesChanged, validationNotes: [], riskNotes: legacy.riskNotes, blockedReason: legacy.blockedReason, missingInformation: legacy.missingInformation, bugfixDetails: { rootCause: legacy.rootCause, reproduced: legacy.reproduced, regressionTestAdded: legacy.regressionTestAdded } });
+    }
+    const profile = EnvironmentProfileSchema.parse(input.profile);
+    const result = await this.runRole('fixer', input.worktreePath, coderPrompt({ ...input, task, profile }, input.safety || this.safety), StrictTaskResultSchema, input.signal, undefined, input.progress);
+    if (result.bugKey !== task.bugKey) throw new Error(`Pi coder returned bugKey ${result.bugKey}, expected ${task.bugKey}`);
+    return result;
+  }
+
   async runReviewer(input: ReviewerInput): Promise<ReviewResultChecked> {
-    const task = BugFixTaskSchema.parse(input.task);
+    const task = 'taskType' in input.task ? CodingTaskSchema.parse(input.task) : BugFixTaskSchema.parse(input.task);
     const profile = EnvironmentProfileSchema.parse(input.profile);
     const validation = DeterministicValidationSchema.parse(input.validation);
     return this.runRole('reviewer', input.worktreePath, reviewerPrompt({ ...input, task, profile, validation }), StrictReviewResultSchema, input.signal, undefined, input.progress);
@@ -809,6 +839,16 @@ export class FakePiRunner implements AgentRunner {
     this.fixerSessions.push(sessionId);
     const result = StrictFixResultSchema.parse(this.fixResult ?? { bugKey: input.task.bugKey, status: 'fixed', confidence: 1, summary: 'Fake fixer result', rootCause: null, reproduced: true, regressionTestAdded: false, filesChanged: [], riskNotes: [], blockedReason: null, missingInformation: [] });
     await input.progress?.({ role: 'fixer', eventType: 'completed', summary: 'fixer completed' });
+    return result;
+  }
+
+  async runCoder(input: Omit<FixerInput, 'task'> & { task: CodingTask }): Promise<AgentTaskResultChecked> {
+    if (input.task.taskType === 'bugfix') {
+      const legacy = await this.runFixer({ ...input, task: input.task });
+      return StrictTaskResultSchema.parse({ bugKey: legacy.bugKey, taskType: 'bugfix', status: legacy.status === 'fixed' ? 'completed' : legacy.status === 'failed' ? 'failed' : 'blocked', confidence: legacy.confidence, summary: legacy.summary, filesChanged: legacy.filesChanged, validationNotes: [], riskNotes: legacy.riskNotes, blockedReason: legacy.blockedReason, missingInformation: legacy.missingInformation, bugfixDetails: { rootCause: legacy.rootCause, reproduced: legacy.reproduced, regressionTestAdded: legacy.regressionTestAdded } });
+    }
+    const result = StrictTaskResultSchema.parse({ bugKey: input.task.bugKey, taskType: 'development', status: 'completed', confidence: 1, summary: 'Fake coder result', filesChanged: [], validationNotes: [], riskNotes: [], blockedReason: null, missingInformation: [], developmentDetails: { requirementsAddressed: input.task.requirements, acceptanceCriteriaAddressed: input.task.acceptanceCriteria, designNotes: [] } });
+    await input.progress?.({ role: 'fixer', eventType: 'completed', summary: 'coder completed' });
     return result;
   }
   async runReviewer(input: ReviewerInput): Promise<ReviewResultChecked> {

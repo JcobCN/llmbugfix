@@ -5,7 +5,8 @@ import type { SqliteDatabase } from './database.js';
 const json = (value: unknown): string => JSON.stringify(value);
 const parseJson = <T>(value: unknown, parser: { parse: (value: unknown) => T }): T => parser.parse(typeof value === 'string' ? JSON.parse(value) : value);
 type UserInput = Omit<User, 'id' | 'createdAt' | 'updatedAt'> & Partial<Pick<User, 'id' | 'createdAt' | 'updatedAt'>>;
-type BugInput = Omit<BugReport, 'id' | 'bugKey' | 'createdAt' | 'updatedAt'> & Partial<Pick<BugReport, 'id' | 'bugKey' | 'createdAt' | 'updatedAt'>>;
+type DefaultedTaskFields = 'taskType' | 'objective' | 'requirements' | 'acceptanceCriteria' | 'nonGoals' | 'constraints' | 'referenceContext';
+type BugInput = Omit<BugReport, 'id' | 'bugKey' | 'createdAt' | 'updatedAt' | DefaultedTaskFields> & Partial<Pick<BugReport, 'id' | 'bugKey' | 'createdAt' | 'updatedAt' | DefaultedTaskFields>>;
 export type WorkerEventInput = {
   bugId: string;
   jobId: string;
@@ -70,7 +71,7 @@ export class SQLiteBugRepository implements BugRepository {
       const value = BugReportSchema.parse({ ...input, id: input.id ?? newId(), bugKey: input.bugKey ?? this.nextBugKey(), createdAt: input.createdAt ?? now(), updatedAt: input.updatedAt ?? now() });
       // The reporter is a foreign key and must exist before the report is persisted.
       if (!this.getUser(value.reporter.userId)) throw new NotFoundError('User', value.reporter.userId);
-      this.database.prepare('INSERT INTO bug_reports (id, bug_key, reporter_id, conversation_id, status, report, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(value.id, value.bugKey, value.reporter.userId, value.intake.conversationId, 'DRAFT', json(value), value.createdAt, value.updatedAt);
+      this.database.prepare('INSERT INTO bug_reports (id, bug_key, task_type, reporter_id, conversation_id, status, report, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(value.id, value.bugKey, value.taskType, value.reporter.userId, value.intake.conversationId, 'DRAFT', json(value), value.createdAt, value.updatedAt);
       return value;
     };
     return this.database.transaction(body)();

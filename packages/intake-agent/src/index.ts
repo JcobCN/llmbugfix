@@ -50,9 +50,11 @@ export function sha256Document(content: string): string {
   return createHash('sha256').update(Buffer.from(content, 'utf8')).digest('hex');
 }
 
-const documentSectionNames = ['Actual Behavior', 'Expected Behavior', 'Reproduction', 'Environment', 'Evidence', 'Regression', 'Impact', 'Missing Information', 'Reporter Notes'] as const;
+const documentSectionNames = ['Objective', 'Requirements', 'Acceptance Criteria', 'Non-goals', 'Constraints', 'Reference Context', 'Actual Behavior', 'Expected Behavior', 'Reproduction', 'Environment', 'Evidence', 'Regression', 'Impact', 'Missing Information', 'Reporter Notes'] as const;
 type DocumentSectionName = typeof documentSectionNames[number];
 const sectionAlias: Record<string, DocumentSectionName | undefined> = {
+  objective: 'Objective', requirements: 'Requirements', requirement: 'Requirements', 'acceptance criteria': 'Acceptance Criteria', acceptance: 'Acceptance Criteria',
+  'non-goals': 'Non-goals', 'non goals': 'Non-goals', constraints: 'Constraints', 'reference context': 'Reference Context',
   'actual behavior': 'Actual Behavior', actual: 'Actual Behavior',
   'expected behavior': 'Expected Behavior', expected: 'Expected Behavior',
   reproduction: 'Reproduction', 'reproduction steps': 'Reproduction', steps: 'Reproduction',
@@ -104,7 +106,15 @@ function section(title: string, body: string): string { return `## ${title}\n${b
  * LLM and does not include values which are absent in the draft.
  */
 export function renderBugDocument(draft: BugReportDraft, completeness?: CompletenessEvaluation): string {
-  const output: string[] = [`# ${textOf(draft.title, '未命名问题')}`, ''];
+  const output: string[] = ['# ' + textOf(draft.title, draft.taskType === 'development' ? '未命名开发任务' : '未命名问题'), ''];
+  if (draft.taskType === 'development') {
+    output.push(section('Objective', textOf(draft.objective, '尚未确认')), '');
+    output.push(section('Requirements', draft.requirements?.length ? markdownBullet(draft.requirements) : '尚未确认'), '');
+    output.push(section('Acceptance Criteria', draft.acceptanceCriteria?.length ? markdownBullet(draft.acceptanceCriteria) : '尚未确认'), '');
+    if (draft.nonGoals?.length) output.push(section('Non-goals', markdownBullet(draft.nonGoals)), '');
+    if (draft.constraints?.length) output.push(section('Constraints', markdownBullet(draft.constraints)), '');
+    if (draft.referenceContext?.length) output.push(section('Reference Context', markdownBullet(draft.referenceContext)), '');
+  } else {
   output.push(section('Actual Behavior', textOf(draft.actualBehavior, '尚未确认')), '');
   output.push(section('Expected Behavior', textOf(draft.expectedBehavior, '尚未确认')), '');
   const reproduction = draft.reproduction;
@@ -113,6 +123,7 @@ export function renderBugDocument(draft: BugReportDraft, completeness?: Complete
     ? steps.map((step, index) => `${index + 1}. ${step}`).join('\n')
     : '尚未确认';
   output.push(section('Reproduction', reproductionBody), '');
+  }
 
   const environment = draft.environment;
   const environmentLines: string[] = [];
@@ -237,6 +248,10 @@ export function reconcileBugDocument(input: DocumentReconciliationInput): Docume
   for (const field of ['Actual Behavior', 'Expected Behavior'] as const) {
     if (parsed.sections.has(field)) markValue(field === 'Actual Behavior' ? 'actualBehavior' : 'expectedBehavior', parsed.sections.get(field), { clearable: true });
   }
+  if (parsed.sections.has('Objective')) markValue('objective', parsed.sections.get('Objective'), { clearable: true });
+  for (const [sectionName, field] of [['Requirements', 'requirements'], ['Acceptance Criteria', 'acceptanceCriteria'], ['Non-goals', 'nonGoals'], ['Constraints', 'constraints'], ['Reference Context', 'referenceContext']] as const) {
+    const body = parsed.sections.get(sectionName); if (body === undefined) continue; const values = linesOf(body).map((line) => line.replace(/^(?:[-*]|\d+[.)])\s+/, '').trim()).filter((line) => !isPlaceholder(line)); if (values.length) setUpdate(updates, field, values);
+  }
   const meaningful = (value: unknown): boolean => {
     if (value === undefined || value === null) return false;
     if (typeof value === 'string') return Boolean(value.trim()) && !isPlaceholder(value) && !explicitUnknown(value);
@@ -246,7 +261,8 @@ export function reconcileBugDocument(input: DocumentReconciliationInput): Docume
   };
   // Core headings are always emitted by the renderer. If a user removes one while a known
   // value exists, surface an ambiguity instead of silently treating omission as a clear.
-  for (const [name, field] of [['Actual Behavior', 'actualBehavior'], ['Expected Behavior', 'expectedBehavior'], ['Reproduction', 'reproduction.steps'], ['Evidence', 'evidence'], ['Regression', 'regression'], ['Impact', 'impact']] as const) {
+  const managedFields = input.currentDraft.taskType === 'development' ? [['Objective', 'objective'], ['Requirements', 'requirements'], ['Acceptance Criteria', 'acceptanceCriteria'], ['Non-goals', 'nonGoals'], ['Constraints', 'constraints'], ['Reference Context', 'referenceContext']] as const : [['Actual Behavior', 'actualBehavior'], ['Expected Behavior', 'expectedBehavior'], ['Reproduction', 'reproduction.steps'], ['Evidence', 'evidence'], ['Regression', 'regression'], ['Impact', 'impact']] as const;
+  for (const [name, field] of managedFields) {
     if (!parsed.sections.has(name) && meaningful(getPath(input.currentDraft, field))) conflicts.push({ field, reason: 'The managed section was removed; deletion intent is ambiguous.', previousValue: getPath(input.currentDraft, field) });
   }
   const knownEnvironment = meaningful(input.currentDraft.environment) || meaningful(input.currentDraft.executionTarget) || meaningful(input.currentDraft.environmentProfileId) || meaningful(input.currentDraft.environmentProfile);
@@ -377,13 +393,15 @@ export class FakeDocumentReconciler implements DocumentReconciler {
 }
 
 export const BUG_INTAKE_SYSTEM_PROMPT = `You are an internal software bug intake assistant.
+You support two task types: bugfix for existing defects and development for new or changed capabilities. Preserve or infer taskType, and ask when intent is ambiguous.
+For development tasks, collect the objective, concrete requirements, at least one verifiable acceptance criterion, project/module name, and Git repository remote. Reproduction and root-cause fields do not apply.
 Your job is to interview a software tester and produce an engineering-quality BugReport that another coding agent can use to investigate and fix the defect.
 
 This environment has no Internet access. Do not search the web, call public services, modify code, run commands, use Git, start a fixer, diagnose root cause, or access production systems.
 
 Rules:
 1. Extract information already provided; never ask again for information already answered.
-2. The submission gate has exactly four required facts: what actually happened, what was expected, the project/module name, and the Git repository remote. Ask at most 3 questions per turn, prioritizing whichever of these four facts is missing or unclear.
+2. The bugfix gate requires actual behavior, expected behavior, project/module, and Git remote. The development gate requires objective, requirements, acceptance criteria, project/module, and Git remote. Ask at most 3 questions per turn, prioritizing missing required facts.
 3. Separate actual behavior from expected behavior and distinguish facts from reporter hypotheses.
 4. Identify frontend, backend, or unknown; ask the tester when confidence is insufficient.
 5. Never invent reproduction steps or environment information. Preserve exact errors where useful.
@@ -398,7 +416,7 @@ Rules:
 14. For every report, ask the tester for its Git remote clone URL (HTTPS or SSH) when it is not already present in the current draft, even if an existing environmentProfileId is known. A profile ID never replaces this required URL. Do not ask for a local filesystem path. Once the remote is known, return it in fieldUpdates.environmentProfile.repositoryUrl; also return a concise project name in fieldUpdates.environmentProfile.name, the frontend/backend target in fieldUpdates.environmentProfile.target, and defaultBranch when known. setupCommands and validationCommands are optional and should only be included when the tester provides them; never invent them.
 15. Do not ask for internal field names or schema values. Ask for human-understandable facts only.
 16. Return only JSON matching the supplied IntakeTurnResult schema. The server applies the deterministic four-fact gate after this turn; do not ask optional enhancement questions when those four facts are already present. The optional profile shape is { name?, repositoryUrl?, defaultBranch?, target?: "frontend"|"backend", setupCommands?: string[], validationCommands?: string[] }.
-17. The title must use the exact format "[module-name]-[problem symptom]". Use the confirmed project/module name and a concise observable failure, not a greeting, generic wording, suspected root cause, or fix. When later facts make an existing title incomplete, generic, or incorrectly formatted, return the corrected title in fieldUpdates.title.`;
+17. The title must use "[module-name]-[problem symptom]" for bugfix and "[module-name]-[capability/change]" for development. When later facts make a title incomplete or generic, return the corrected title in fieldUpdates.title.`;
 
 const INTAKE_OUTPUT_CONTRACT = `Return a JSON object with ALL of these top-level fields:
 {
@@ -411,7 +429,7 @@ const INTAKE_OUTPUT_CONTRACT = `Return a JSON object with ALL of these top-level
   "questions": [],
   "readyForConfirmation": false
 }
-fieldUpdates is a partial BugReport draft: include only supported facts that changed; omit unknown fields. Common fields are title, actualBehavior, expectedBehavior (strings), executionTarget ("frontend", "backend", or "unknown"), productArea, component, environmentProfileId (strings or null), reproduction (object with steps/prerequisites/testData string arrays, reproducible boolean or null, frequency "always"|"often"|"sometimes"|"rare"|"once"|"unknown"), environment (object with environmentName/appVersion/buildNumber/commitSha strings or null and additionalInfo mapping strings to strings), evidence (object with errorMessages/stackTraces string arrays), and environmentProfile as described above. Do not use prose strings in place of nested objects.
+fieldUpdates is a partial BugReport draft: include only supported facts that changed; omit unknown fields. Common fields are taskType ("bugfix"|"development"), title, actualBehavior, expectedBehavior, objective, requirements, acceptanceCriteria, nonGoals, constraints, referenceContext, executionTarget, productArea, component, environmentProfileId, reproduction, environment, evidence, and environmentProfile. requirements and other development lists are arrays of strings. Do not use prose strings in place of nested objects.
 observations and reporterHypotheses are arrays of strings; keep facts and speculation separate.
 contradictions is an array of objects { "field": string, "previousValue": any JSON value, "newValue": any JSON value }.
 possibleSensitiveData and readyForConfirmation are booleans. executionTargetConfidence is a number from 0 to 1; use 0 when unknown.
@@ -519,7 +537,7 @@ function textLines(text: string): string[] { return text.split(/\r?\n/).map((lin
 const lowQualityTitlePart = /^(?:hello|hi|hey|test|testing|bug|issue|problem|unknown|unspecified bug|未命名(?:问题|bug)|测试|有问题|存在问题|页面问题|功能问题|项目问题|问题|你好|您好)$/iu;
 const cleanTitlePart = (value: string, maxLength: number): string => value.replace(/[\r\n\[\]]+/gu, ' ').replace(/\s+/gu, ' ').replace(/^[\s,，;；:：.!！?？-]+|[\s,，;；:：.!！?？-]+$/gu, '').trim().slice(0, maxLength).trim();
 const repositoryName = (remote?: string): string | undefined => remote?.replace(/[?#].*$/u, '').replace(/\/+$/u, '').split(/[/:]/u).at(-1)?.replace(/\.git$/iu, '');
-const titleSymptom = (value?: string): string | undefined => {
+const titleSymptom = (value?: string | null): string | undefined => {
   if (!value) return undefined;
   const formatted = value.match(/^\s*\[[^\]\r\n]+\]-\[([^\]\r\n]+)\]\s*$/u)?.[1];
   let symptom = cleanTitlePart(formatted ?? value, 120);
@@ -546,7 +564,7 @@ export function normalizeBugTitle(draft: BugReportDraft): string | undefined {
     120,
   );
   if (!moduleName || lowQualityTitlePart.test(moduleName)) return undefined;
-  const candidates = [draft.title, draft.actualBehavior, ...(draft.reproduction?.steps ?? [])];
+  const candidates = draft.taskType === 'development' ? [draft.title, draft.objective, ...(draft.requirements ?? [])] : [draft.title, draft.actualBehavior, ...(draft.reproduction?.steps ?? [])];
   const symptom = candidates.map(titleSymptom).find((value): value is string => Boolean(value));
   return symptom ? `[${moduleName}]-[${symptom}]` : undefined;
 }
@@ -588,15 +606,25 @@ const extractEnvironment = (text: string, current: BugReportDraft['environment']
 };
 function extractUpdates(text: string, current: BugReportDraft): BugReportDraft {
   const updates: Record<string, unknown> = {};
+  const developmentIntent = current.taskType === 'development' || /(?:开发任务|新增|增加|实现|支持|改造|feature|implement|add support)/iu.test(text);
+  if (/(?:bug|缺陷|故障|报错|异常|修复)/iu.test(text) && !developmentIntent) updates.taskType = 'bugfix';
+  else if (developmentIntent) updates.taskType = 'development';
   if (/(frontend|front-end|\bui\b|\bweb\b|browser|前端|页面|网页|按钮)/i.test(text)) updates.executionTarget = 'frontend';
   else if (/(backend|back-end|\bapi\b|server|database|后端|接口|服务|服务器)/i.test(text)) updates.executionTarget = 'backend';
   const expectedMatch = text.match(expectedMarker);
   const actualText = expectedMatch?.index === undefined
     ? text.trim()
     : text.slice(0, expectedMatch.index).replace(/[，,；;：:\s]+$/u, '').trim();
-  if ((!current.actualBehavior || correctionIntent(text)) && actualText) updates.actualBehavior = actualText;
-  if (expectedMatch?.[1]?.trim()) updates.expectedBehavior = expectedMatch[1].trim();
-  if (!current.title) updates.title = textLines(text)[0]?.slice(0, 120) || '未命名 Bug';
+  if (developmentIntent) {
+    if (!current.objective || correctionIntent(text)) updates.objective = textLines(text)[0]?.slice(0, 500) ?? text.trim();
+    const listed = textLines(text).map((line) => line.replace(/^(?:[-*]|\d+[.)、：:])\s*/u, '').trim()).filter(Boolean);
+    if (/验收|acceptance|done when|完成标准/iu.test(text)) updates.acceptanceCriteria = listed.length ? listed : [text.trim()];
+    else if (/需求|要求|需要|必须|should|must|require/iu.test(text)) updates.requirements = listed.length ? listed : [text.trim()];
+  } else {
+    if ((!current.actualBehavior || correctionIntent(text)) && actualText) updates.actualBehavior = actualText;
+    if (expectedMatch?.[1]?.trim()) updates.expectedBehavior = expectedMatch[1].trim();
+  }
+  if (!current.title) updates.title = textLines(text)[0]?.slice(0, 120) || (developmentIntent ? '未命名开发任务' : '未命名 Bug');
   const stepLines = textLines(text).filter((line) => /^(?:step\s*)?\d+[.)、：:]/i.test(line));
   const actionStep = /(?:点击|输入|打开|访问|登录|click|open|navigate|enter|select)/i.test(text) ? [text.trim()] : [];
   if (stepLines.length || actionStep.length || /(?:每次|总是|always|reproducible)/i.test(text)) updates.reproduction = { ...(current.reproduction ?? {}), reproducible: /(?:每次|总是|always|reproducible)/i.test(text) ? true : (current.reproduction?.reproducible ?? null), frequency: /(?:每次|总是|always)/i.test(text) ? 'always' : (current.reproduction?.frequency ?? 'unknown'), prerequisites: current.reproduction?.prerequisites ?? [], steps: stepLines.length ? stepLines : (current.reproduction?.steps ?? actionStep), testData: current.reproduction?.testData ?? [] };

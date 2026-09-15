@@ -1,4 +1,4 @@
-import { AgentFixResultSchema, BugReportSchema, BugStatusSchema, type BugStatus } from '@llmbugfix/bug-domain';
+import { AgentFixResultSchema, AgentTaskResultSchema, BugReportSchema, BugStatusSchema, type BugStatus } from '@llmbugfix/bug-domain';
 import { AppError } from '@llmbugfix/shared';
 import {
   WeeklyBugReportSchema,
@@ -43,6 +43,8 @@ export function truncateWeeklySummary(value: string): string {
 
 function summaryFor(report: ReturnType<typeof BugReportSchema.parse>, outputs: readonly unknown[]): string | null {
   for (const output of outputs) {
+    const task = AgentTaskResultSchema.safeParse(output);
+    if (task.success && task.data.bugKey === report.bugKey) { const value = task.data.status === 'completed' ? task.data.summary : task.data.blockedReason?.trim() || task.data.summary; if (value.trim()) return truncateWeeklySummary(value.trim()); }
     const parsed = AgentFixResultSchema.strict().safeParse(output);
     if (!parsed.success || parsed.data.bugKey !== report.bugKey) continue;
     const value = parsed.data.status === 'fixed' ? parsed.data.summary : parsed.data.blockedReason?.trim() || parsed.data.summary;
@@ -99,10 +101,10 @@ export class DefaultWeeklyReportService implements WeeklyReportService {
 }
 
 export function weeklyReportSubject(report: WeeklyBugReport): string {
-  return `[LLMBugFix] Bug 修复周报 ${shanghaiDate(report.periodStart)} ~ ${shanghaiDate(report.periodEnd)}`;
+  return `[LLMBugFix] 开发任务周报 ${shanghaiDate(report.periodStart)} ~ ${shanghaiDate(report.periodEnd)}`;
 }
 
-const categoryLabels: Record<WeeklyReportCategory, string> = { success: '修复成功', failed: '失败/阻塞', inProgress: '处理中' };
+const categoryLabels: Record<WeeklyReportCategory, string> = { success: '完成', failed: '失败/阻塞', inProgress: '处理中' };
 const display = (value: string | null): string => value ?? '-';
 const escapeHtml = (value: string): string => value.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;').replace(/'/gu, '&#39;');
 
@@ -112,20 +114,20 @@ export function renderWeeklyReport(value: WeeklyBugReport): RenderedWeeklyReport
   const report = WeeklyBugReportSchema.parse(value);
   const period = `${shanghaiDateTime(report.periodStart)} ~ ${shanghaiDateTime(report.periodEnd)}（Asia/Shanghai）`;
   const text: string[] = [
-    'LLMBugFix Bug 修复周报',
+    'LLMBugFix 开发任务周报',
     `统计区间：${period}`,
-    `修复成功：${report.successCount}；失败/阻塞：${report.failedCount}；处理中：${report.inProgressCount}`,
+    `完成：${report.successCount}；失败/阻塞：${report.failedCount}；处理中：${report.inProgressCount}`,
     '',
   ];
   const html: string[] = [
-    '<!doctype html><html><head><meta charset="utf-8"><title>LLMBugFix Bug 修复周报</title></head><body>',
-    '<h1>LLMBugFix Bug 修复周报</h1>',
+    '<!doctype html><html><head><meta charset="utf-8"><title>LLMBugFix 开发任务周报</title></head><body>',
+    '<h1>LLMBugFix 开发任务周报</h1>',
     `<p>统计区间：${escapeHtml(period)}</p>`,
-    `<p>修复成功：${report.successCount}；失败/阻塞：${report.failedCount}；处理中：${report.inProgressCount}</p>`,
+    `<p>完成：${report.successCount}；失败/阻塞：${report.failedCount}；处理中：${report.inProgressCount}</p>`,
   ];
   if (report.bugs.length === 0) {
-    text.push('本周无 Bug 修复进展');
-    html.push('<p>本周无 Bug 修复进展</p>');
+    text.push('本周无开发任务进展');
+    html.push('<p>本周无开发任务进展</p>');
   } else {
     for (const category of ['success', 'failed', 'inProgress'] as const) {
       const items = report.bugs.filter((bug) => bug.category === category).sort(itemOrder);
@@ -133,7 +135,7 @@ export function renderWeeklyReport(value: WeeklyBugReport): RenderedWeeklyReport
       html.push(`<h2>${categoryLabels[category]}（${items.length}）</h2><ul>`);
       for (const bug of items) {
         const fields = [
-          ['Bug Key', bug.bugKey], ['标题', bug.title], ['项目/模块', `${display(bug.productArea)} / ${display(bug.component)}`],
+          ['任务编号', bug.bugKey], ['标题', bug.title], ['项目/模块', `${display(bug.productArea)} / ${display(bug.component)}`],
           ['执行目标', bug.executionTarget], ['当前状态', bug.currentStatus], ['最近进展时间', shanghaiDateTime(bug.latestProgressAt)], ['摘要', display(bug.summary)],
         ] as const;
         text.push(...fields.map(([label, field]) => `${label}：${field}`), '');

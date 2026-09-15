@@ -106,6 +106,22 @@ describe('Intake Policy & Completeness Scoring', () => {
     expect(result.recommendedQuestions).toContain('这个问题所在项目的 Git 仓库远程地址是什么？请提供 HTTPS 或 SSH clone 地址。');
   });
 
+  it('uses objective, requirements and acceptance criteria for development tasks', () => {
+    const draft: BugReportDraft = { taskType: 'development', objective: 'Add CSV export to the orders page', requirements: ['Export the current filtered rows'], acceptanceCriteria: ['Clicking Export downloads a CSV containing the visible rows'], component: 'orders', environmentProfile: { name: 'orders-web', repositoryUrl: 'https://git.example.test/orders-web.git' } };
+    const result = evaluateCompleteness(draft);
+    expect(hasCoreSubmissionInformation(draft)).toBe(true);
+    expect(result.readyForConfirmation).toBe(true);
+    expect(result.dimensions.objective).toBe(25);
+    expect(questionStrategy(draft)).toEqual([]);
+  });
+
+  it('does not require bug reproduction fields for development tasks', () => {
+    const result = evaluateCompleteness({ taskType: 'development', objective: 'Add export', requirements: ['Export rows'], component: 'orders', environmentProfile: { repositoryUrl: 'https://git.example.test/orders.git' } });
+    expect(result.readyForSubmission).toBe(false);
+    expect(result.missingCriticalInformation).toContain('acceptanceCriteria');
+    expect(result.missingCriticalInformation).not.toContain('actualBehavior');
+  });
+
   it.each([
     ['actualBehavior', { expectedBehavior: '应该切换', component: 'store', environmentProfile: { repositoryUrl: 'https://git.example.test/store.git' } }],
     ['expectedBehavior', { actualBehavior: '停留在原 tab', component: 'store', environmentProfile: { repositoryUrl: 'https://git.example.test/store.git' } }],

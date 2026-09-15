@@ -86,6 +86,15 @@ describe('Bug API routes', () => {
     expect((await server.inject({ method: 'POST', url: `/api/bugs/${submitted.data.bugKey}/retry` })).status).toBe(409);
   });
 
+  it('creates and submits a development task without bug reproduction fields', async () => {
+    const created = await server.inject<{ id: string; draft: { taskType: string } }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId, taskType: 'development' } });
+    expect(created.data.draft.taskType).toBe('development');
+    await server.inject({ method: 'PATCH', url: `/api/bugs/conversations/${created.data.id}/draft`, body: { draft: { objective: 'Add CSV export', requirements: ['Export filtered rows'], acceptanceCriteria: ['Clicking Export downloads the filtered rows'], component: 'orders', executionTarget: 'frontend', environmentProfile: { name: 'orders-web', repositoryUrl: 'https://git.example.test/orders-web.git' } } } });
+    const submitted = await server.inject<{ bug: { taskType: string; objective: string; actualBehavior: string } }>({ method: 'POST', url: `/api/bugs/conversations/${created.data.id}/submit`, body: { confirmed: true } });
+    expect(submitted.status, submitted.raw).toBe(201);
+    expect(submitted.data.bug).toMatchObject({ taskType: 'development', objective: 'Add CSV export', actualBehavior: '' });
+  });
+
   it('does not claim cancellation for a state outside the cancellation transitions', async () => {
     const created = await server.inject<{ id: string }>({ method: 'POST', url: '/api/bugs/conversations', body: { reporterId: userId } });
     await server.inject({ method: 'PATCH', url: `/api/bugs/conversations/${created.data.id}/draft`, body: { draft: { title: 'validation cancellation', actualBehavior: 'broken', expectedBehavior: 'works', executionTarget: 'frontend', component: 'login', environmentProfile: { name: 'storefront', repositoryUrl: 'https://git.example.test/team/storefront.git' } } } });
@@ -303,7 +312,7 @@ describe('Bug API routes', () => {
     expect(intake.status).toBe(200);
     expect(intake.headers['content-type']).toBe('text/html; charset=utf-8');
     expect(intake.headers['x-content-type-options']).toBe('nosniff');
-    expect(intake.raw).toContain('Bug Intake');
+    expect(intake.raw).toContain('Development Task Intake');
     expect(intake.raw).toContain('<script src="/static/intake.js"></script>');
 
     const dashboard = await webServer.inject({ method: 'GET', url: '/dashboard' });

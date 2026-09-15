@@ -3,20 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Bug Intake</title>
+  <title>Development Task Intake</title>
   <link rel="stylesheet" href="/static/intake.css">
 </head>
 <body>
   <header>
-    <strong>Bug Intake</strong>
+    <strong>Development Task Intake</strong>
     <span>
       <span id="state" role="status" aria-live="polite">正在创建会话…</span> · <a href="/dashboard">Dashboard</a>
     </span>
   </header>
   <main>
+    <div class="task-type-picker" role="group" aria-label="任务类型"><label><input id="task-type-bugfix" type="radio" name="task-type" value="bugfix" checked> Bug 修复</label><label><input id="task-type-development" type="radio" name="task-type" value="development"> 开发任务</label></div>
     <section id="success-card" class="success-card" role="status" aria-live="polite" aria-atomic="true" hidden>
-      <h2>Bug 已提交</h2>
-      <p><strong>Bug Key：</strong><a id="bug-key-link" href="#"><span id="bug-key"></span></a></p>
+      <h2>任务已提交</h2>
+      <p><strong>任务编号：</strong><a id="bug-key-link" href="#"><span id="bug-key"></span></a></p>
       <p><strong>状态：</strong><span id="submitted-status"></span></p>
       <p><strong>完整度：</strong><span id="submitted-score"></span></p>
       <p id="submitted-explanation"></p>
@@ -32,12 +33,12 @@
         <div id="error" class="error" role="alert" aria-live="assertive" hidden></div>
         <div id="messages"><p class="muted">正在创建会话…</p></div>
         <div class="composer">
-          <textarea id="message" aria-label="Describe the bug" placeholder="请直接描述你遇到的问题…"></textarea>
+          <textarea id="message" aria-label="Describe the task" placeholder="请直接描述你遇到的问题…"></textarea>
           <button id="send" type="button">发送</button>
         </div>
       </section>
       <section class="panel">
-        <h2>Bug Report (Markdown)</h2>
+        <h2>Task Report (Markdown)</h2>
         <div class="document-meta">
           <span>可直接编辑报告内容</span>
           <span>保存：<b id="document-save-state">saved</b> · 同步：<b id="document-sync-state">synced</b></span>

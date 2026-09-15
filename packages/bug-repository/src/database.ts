@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, display_name TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS bug_conversations (id TEXT PRIMARY KEY, reporter_id TEXT NOT NULL REFERENCES users(id), status TEXT NOT NULL, draft TEXT NOT NULL, completeness TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS conversation_documents (conversation_id TEXT PRIMARY KEY REFERENCES bug_conversations(id) ON DELETE CASCADE, relative_path TEXT NOT NULL, revision INTEGER NOT NULL, sha256 TEXT NOT NULL, reconciled_revision INTEGER NOT NULL, reconciled_sha256 TEXT NOT NULL, sync_status TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS conversation_messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES bug_conversations(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, metadata TEXT NOT NULL, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS bug_reports (id TEXT PRIMARY KEY, bug_key TEXT NOT NULL UNIQUE, reporter_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT REFERENCES bug_conversations(id), status TEXT NOT NULL, report TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS bug_reports (id TEXT PRIMARY KEY, bug_key TEXT NOT NULL UNIQUE, task_type TEXT NOT NULL DEFAULT 'bugfix', reporter_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT REFERENCES bug_conversations(id), status TEXT NOT NULL, report TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bug_attachments (id TEXT PRIMARY KEY, bug_id TEXT NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE, attachment TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bug_events (id TEXT PRIMARY KEY, bug_id TEXT NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE, from_status TEXT, to_status TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, bug_id TEXT NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE, status TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0, attempt INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, heartbeat_at TEXT, error TEXT);
@@ -61,6 +61,8 @@ export function initializeDatabase(database: SqliteDatabase): SqliteDatabase {
   database.pragma('foreign_keys = ON');
   database.pragma('busy_timeout = 5000');
   database.exec(CREATE_TABLES_SQL);
+  const bugReportColumns = database.prepare('PRAGMA table_info(bug_reports)').all() as Array<{ name: string }>;
+  if (!bugReportColumns.some((column) => column.name === 'task_type')) database.exec("ALTER TABLE bug_reports ADD COLUMN task_type TEXT NOT NULL DEFAULT 'bugfix'");
   database.prepare('INSERT OR IGNORE INTO bug_key_sequence (id, next_value) VALUES (1, 1)').run();
   database.exec("UPDATE bug_key_sequence SET next_value = MAX(next_value, COALESCE((SELECT MAX(CAST(substr(bug_key, 5) AS INTEGER)) + 1 FROM bug_reports WHERE bug_key GLOB 'BUG-[0-9]*'), 1)) WHERE id = 1");
   return database;
