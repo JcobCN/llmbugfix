@@ -9,6 +9,7 @@ dist/
 data/
 logs/
 .playwright-cli/
+.mimocode/
 coverage/
 packages/*/src/*.js
 packages/*/src/*.js.map
