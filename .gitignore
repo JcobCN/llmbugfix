@@ -4,8 +4,10 @@ dist/
 **/dist/
 **/*.tsbuildinfo
 .env
-data/*.db
-data/*.db-*
+.env.*
+data/
+logs/
+.playwright-cli/
 coverage/
 packages/*/src/*.js
 packages/*/src/*.js.map
@@ -24,4 +26,3 @@ tests/*.d.ts.map
 /vitest.config.js.map
 /vitest.config.d.ts
 /vitest.config.d.ts.map
-./data
