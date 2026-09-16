@@ -92,13 +92,38 @@ export type BugConversation = z.infer<typeof BugConversationSchema>;
 export const CompletenessEvaluationSchema = z.object({ score: z.number().min(0).max(100), dimensions: z.object({ problem: z.number().min(0).max(25), reproduction: z.number().min(0).max(30), environment: z.number().min(0).max(15), evidence: z.number().min(0).max(20), impact: z.number().min(0).max(10), objective: z.number().min(0).max(25).optional(), requirements: z.number().min(0).max(25).optional(), acceptance: z.number().min(0).max(25).optional(), scope: z.number().min(0).max(10).optional() }), missingCriticalInformation: z.array(z.string()), recommendedQuestions: z.array(z.string()), readyForSubmission: z.boolean(), readyForConfirmation: z.boolean().optional() });
 export type CompletenessEvaluation = z.infer<typeof CompletenessEvaluationSchema>;
 
-export const JobStatusSchema = z.enum(['QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED']);
+export const JobStatusSchema = z.enum(['QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED']);
 export type JobStatus = z.infer<typeof JobStatusSchema>;
-export const JobSchema = z.object({ id, bugId: id, status: JobStatusSchema, priority: z.number().int(), attempt: z.number().int().nonnegative(), createdAt: iso, startedAt: iso.nullable(), finishedAt: iso.nullable(), heartbeatAt: iso.nullable(), error: nullableString });
+export const JobRoutingRequirementsSchema = z.object({
+  priority: z.enum(['high', 'normal', 'low']).default('normal'),
+  capabilityHints: z.array(z.string().min(1).max(64)).max(16).default([]),
+  quality: z.enum(['standard', 'high']).default('standard'),
+}).strict();
+export type JobRoutingRequirements = z.infer<typeof JobRoutingRequirementsSchema>;
+export const JobFailureClassSchema = z.enum([
+  'connection', 'tls', 'timeout', 'http_408', 'http_429', 'http_5xx', 'http_4xx',
+  'authentication', 'contract', 'cancelled', 'agent_failed', 'no_diff',
+  'validation_failed', 'review_rejected', 'unknown',
+]);
+export type JobFailureClass = z.infer<typeof JobFailureClassSchema>;
+export const JobSchema = z.object({
+  id, bugId: id, status: JobStatusSchema, priority: z.number().int(), attempt: z.number().int().nonnegative(),
+  createdAt: iso, startedAt: iso.nullable(), finishedAt: iso.nullable(), heartbeatAt: iso.nullable(), error: nullableString,
+  // These fields are optional so rows created before lease-aware migrations
+  // still validate and existing repository callers remain source-compatible.
+  workerId: nullableString.optional(), leaseToken: nullableString.optional(), leaseExpiresAt: iso.nullable().optional(),
+  claimedAt: iso.nullable().optional(), routingRequirements: JobRoutingRequirementsSchema.nullable().optional(),
+  failureClass: JobFailureClassSchema.nullable().optional(), lastFailureBackendId: z.string().min(1).nullable().optional(),
+});
 export type Job = z.infer<typeof JobSchema>;
 
 export const AgentRunStatusSchema = z.enum(['RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED']);
-export const AgentRunSchema = z.object({ id, bugId: id, jobId: id.nullable(), agentType: z.enum(['intake', 'fixer', 'reviewer', 'other']), status: AgentRunStatusSchema, sessionId: nullableString, startedAt: iso, finishedAt: iso.nullable(), input: z.record(z.unknown()).default({}), output: z.record(z.unknown()).nullable(), error: nullableString });
+export const AgentRunSchema = z.object({
+  id, bugId: id, jobId: id.nullable(), agentType: z.enum(['intake', 'fixer', 'reviewer', 'other']), status: AgentRunStatusSchema,
+  sessionId: nullableString, startedAt: iso, finishedAt: iso.nullable(), input: z.record(z.unknown()).default({}), output: z.record(z.unknown()).nullable(), error: nullableString,
+  backendId: z.string().min(1).nullable().optional(), model: z.string().min(1).nullable().optional(),
+  roleAttempt: z.number().int().positive().optional(), failureClass: JobFailureClassSchema.nullable().optional(), leaseToken: nullableString.optional(),
+});
 export type AgentRun = z.infer<typeof AgentRunSchema>;
 
 export const BugFixTaskSchema = z.object({ bugKey: z.string().regex(/^BUG-[0-9]{6,}$/), title: z.string().min(1), executionTarget: z.enum(['frontend', 'backend']), environmentProfileId: z.string().min(1), actualBehavior: z.string().min(1), expectedBehavior: nullableString, reproductionSteps: z.array(z.string()), prerequisites: z.array(z.string()), environment: z.record(z.unknown()), errorMessages: z.array(z.string()), stackTraces: z.array(z.string()), attachments: z.array(AttachmentRefSchema), lastKnownGoodVersion: nullableString, failingVersion: nullableString, reporterObservations: z.array(z.string()), reporterHypotheses: z.array(z.string()), machineObservations: z.array(z.string()), missingInformation: z.array(z.string()), completenessScore: z.number().min(0).max(100) });
@@ -148,6 +173,8 @@ export const conversationMessageSchema = ConversationMessageSchema;
 export const completenessEvaluationSchema = CompletenessEvaluationSchema;
 export const jobSchema = JobSchema;
 export const agentRunSchema = AgentRunSchema;
+export const jobRoutingRequirementsSchema = JobRoutingRequirementsSchema;
+export const jobFailureClassSchema = JobFailureClassSchema;
 export const bugFixTaskSchema = BugFixTaskSchema;
 export const agentFixResultSchema = AgentFixResultSchema;
 export const codingTaskSchema = CodingTaskSchema;

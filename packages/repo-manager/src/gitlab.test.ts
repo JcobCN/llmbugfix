@@ -83,11 +83,42 @@ describe('GitLabPushTarget', () => {
     expect(calls[0].method).toBe('GET');
   });
 
+  it('single-flights concurrent ensureProject calls for one mirror project', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-gl-'));
+    const credentials = path.join(root, '.git-credentials');
+    fs.writeFileSync(credentials, 'http://codigger-llm:pat-stored@172.29.100.126\n', 'utf8');
+    const { fetchImpl, calls } = fakeGitLab({ projectExists: false });
+    const pushTarget = target({ credentialsFile: credentials, fetchImpl });
+    const urls = await Promise.all([
+      pushTarget.ensureProject('storefront'),
+      pushTarget.ensureProject('storefront'),
+      pushTarget.ensureProject('storefront'),
+    ]);
+    expect(urls).toEqual([
+      'http://172.29.100.126/codigger-llm/storefront.git',
+      'http://172.29.100.126/codigger-llm/storefront.git',
+      'http://172.29.100.126/codigger-llm/storefront.git',
+    ]);
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+    expect(calls.filter((call) => call.url.includes('/api/v4/projects/'))).toHaveLength(1);
+  });
+
+  it('single-flights PAT bootstrap before creating a project', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-gl-'));
+    const credentials = path.join(root, '.git-credentials');
+    const { fetchImpl, calls } = fakeGitLab({ projectExists: true });
+    const pushTarget = target({ credentialsFile: credentials, fetchImpl, password: 'explicit-test-password' });
+    await Promise.all([pushTarget.ensureProject('storefront'), pushTarget.ensureProject('another')]);
+    expect(calls.filter((call) => call.url.endsWith('/users/sign_in') && call.method === 'GET')).toHaveLength(1);
+    expect(calls.filter((call) => call.url.endsWith('/profile/personal_access_tokens') && call.method === 'POST')).toHaveLength(1);
+    expect(fs.readFileSync(credentials, 'utf8')).toContain('glpat-created123');
+  });
+
   it('bootstraps a PAT through the web session when none is stored', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-gl-'));
     const credentials = path.join(root, '.git-credentials');
     const { fetchImpl, calls } = fakeGitLab({ projectExists: true });
-    const url = await target({ credentialsFile: credentials, fetchImpl, password: 'Engine#llm' }).ensureProject('storefront');
+    const url = await target({ credentialsFile: credentials, fetchImpl, password: 'explicit-test-password' }).ensureProject('storefront');
     expect(url).toBe('http://172.29.100.126/codigger-llm/storefront.git');
     // web session: sign-in page, login, PAT page, create form, confirm page
     const flow = calls.filter((call) => !call.url.includes('/api/v4/')).map((call) => `${call.method} ${call.url}`);

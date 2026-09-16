@@ -32,6 +32,7 @@ export interface GitLabPushTargetOptions {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
+const projectFlights = new Map<string, Promise<string>>();
 
 /** Minimal cookie jar: enough for Rails session cookies, no expiry tracking. */
 class CookieJar {
@@ -89,6 +90,7 @@ export class GitLabPushTarget {
   private readonly tokenName: string;
   private readonly timeoutMs: number;
   private cachedToken: string | null = null;
+  private tokenFlight: Promise<string> | null = null;
 
   constructor(options: GitLabPushTargetOptions) {
     let base: URL;
@@ -107,6 +109,21 @@ export class GitLabPushTarget {
   /** Push URL of the own-account private project, creating it when missing. */
   async ensureProject(name: string): Promise<string> {
     if (!PROJECT_NAME.test(name)) throw new Error(`Invalid mirror project name: ${name}`);
+    const projectKey = `${this.base.origin}\0${this.account}\0${name}`;
+    const existing = projectFlights.get(projectKey);
+    if (existing) return existing;
+    // Store the promise before its first await so every concurrent caller
+    // receives this exact flight, including the lookup and possible create.
+    const flight = this.ensureProjectFlow(name);
+    projectFlights.set(projectKey, flight);
+    try {
+      return await flight;
+    } finally {
+      if (projectFlights.get(projectKey) === flight) projectFlights.delete(projectKey);
+    }
+  }
+
+  private async ensureProjectFlow(name: string): Promise<string> {
     const token = await this.resolveToken();
     const projectPath = encodeURIComponent(`${this.account}/${name}`);
     const check = await this.request('GET', `/api/v4/projects/${projectPath}`, { token });
@@ -117,7 +134,8 @@ export class GitLabPushTarget {
       form: new URLSearchParams({ name, path: name, visibility: 'private' }),
     });
     if (created.status === 201 || created.status === 200) return this.projectUrl(name);
-    // A concurrent creator may have won the race; treat "taken" as success.
+    // A concurrent creator outside this process may have won the race;
+    // treating GitLab's "taken" response as success is safe and idempotent.
     if (created.status === 400 && /already (been )?taken/iu.test(created.body)) return this.projectUrl(name);
     throw new Error(`GitLab project creation failed (${created.status}): ${this.excerpt(created.body)}`);
   }
@@ -128,12 +146,20 @@ export class GitLabPushTarget {
 
   private async resolveToken(): Promise<string> {
     if (this.cachedToken) return this.cachedToken;
-    const stored = this.storedToken();
-    if (stored) { this.cachedToken = stored; return stored; }
-    const created = await this.createToken();
-    this.storeToken(created);
-    this.cachedToken = created;
-    return created;
+    if (this.tokenFlight) return this.tokenFlight;
+    this.tokenFlight = (async () => {
+      const stored = this.storedToken();
+      if (stored) { this.cachedToken = stored; return stored; }
+      const created = await this.createToken();
+      this.storeToken(created);
+      this.cachedToken = created;
+      return created;
+    })();
+    try {
+      return await this.tokenFlight;
+    } finally {
+      this.tokenFlight = null;
+    }
   }
 
   /** PAT for this host+account from the git credential store, if present. */

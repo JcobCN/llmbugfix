@@ -76,6 +76,77 @@ describe('RepoManager', () => {
     await expect(manager.cloneRemoteRepository(remote, 'remote-1234567890abcdef')).resolves.toBe(cloned);
     expect(calls.filter((call) => call.includes('clone'))).toHaveLength(1);
   });
+
+  it('serializes concurrent clone attempts for the same checkout target', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-clone-'));
+    const clones = path.join(root, 'repositories');
+    const remote = 'https://git.example.test/team/storefront.git';
+    let cloneCount = 0;
+    let activeClones = 0;
+    let maxActiveClones = 0;
+    const runner = {
+      async run(command: string, args: string[]): Promise<any> {
+        if (args[0] === 'clone') {
+          cloneCount += 1;
+          activeClones += 1;
+          maxActiveClones = Math.max(maxActiveClones, activeClones);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          fs.mkdirSync(path.join(args.at(-1)!, '.git'), { recursive: true });
+          activeClones -= 1;
+        }
+        if (args[0] === 'remote') return { command, args, exitCode: 0, stdout: `${remote}\n`, stderr: '', timedOut: false };
+        return { command, args, exitCode: 0, stdout: '', stderr: '', timedOut: false };
+      },
+    };
+    const manager = new RepoManager({ worktreesRoot: path.join(root, 'worktrees'), cloneRoot: clones, commandRunner: runner as any });
+    const checkouts = await Promise.all([
+      manager.cloneRemoteRepository(remote, 'remote-concurrent'),
+      manager.cloneRemoteRepository(remote, 'remote-concurrent'),
+      manager.cloneRemoteRepository(remote, 'remote-concurrent'),
+    ]);
+    expect(new Set(checkouts).size).toBe(1);
+    expect(cloneCount).toBe(1);
+    expect(maxActiveClones).toBe(1);
+  });
+
+  it('serializes remote setup and own-remote changes for worktrees of one repository', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-repo-lock-'));
+    const repo = path.join(root, 'repo');
+    const wtRoot = path.join(root, 'worktrees');
+    fs.mkdirSync(path.join(repo, '.git', 'worktrees'), { recursive: true });
+    fs.mkdirSync(wtRoot);
+    const worktrees = ['BUG-000001', 'BUG-000002'].map((bug, index) => {
+      const worktree = path.join(wtRoot, bug);
+      fs.mkdirSync(worktree);
+      fs.writeFileSync(path.join(worktree, '.git'), `gitdir: ${path.join(repo, '.git', 'worktrees', `wt-${index}`)}\n`);
+      return worktree;
+    });
+    let ownKnown = false;
+    let activeGitOperations = 0;
+    let maxActiveGitOperations = 0;
+    let remoteAdds = 0;
+    const mirror = 'http://git.example.test/own/storefront.git';
+    const runner = {
+      async run(command: string, args: string[], options: { cwd: string }): Promise<any> {
+        activeGitOperations += 1;
+        maxActiveGitOperations = Math.max(maxActiveGitOperations, activeGitOperations);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        activeGitOperations -= 1;
+        if (args[0] === 'branch' && args[1] === '--show-current') return { command, args, exitCode: 0, stdout: `${path.basename(options.cwd) === 'BUG-000001' ? 'ai/BUG-000001-fix' : 'ai/BUG-000002-fix'}\n`, stderr: '', timedOut: false };
+        if (args[0] === 'remote' && args[1] === 'get-url' && args[2] === 'origin') return { command, args, exitCode: 0, stdout: 'https://git.example.test/team/storefront.git\n', stderr: '', timedOut: false };
+        if (args[0] === 'remote' && args[1] === 'get-url' && args[2] === 'own') return { command, args, exitCode: ownKnown ? 0 : 2, stdout: ownKnown ? `${mirror}\n` : '', stderr: ownKnown ? '' : 'missing', timedOut: false };
+        if (args[0] === 'remote' && args[1] === 'add') { remoteAdds += 1; ownKnown = true; }
+        if (args[0] === '-c') return { command, args, exitCode: 0, stdout: '', stderr: '', timedOut: false };
+        return { command, args, exitCode: 0, stdout: '', stderr: '', timedOut: false };
+      },
+    };
+    const ensureCalls: string[] = [];
+    const manager = new RepoManager({ worktreesRoot: wtRoot, repositoryRoots: [repo], allowedRemoteHost: 'git.example.test', commandRunner: runner as any, ownPushTarget: { ensureProject: async (name) => { ensureCalls.push(name); await new Promise((resolve) => setTimeout(resolve, 2)); return mirror; } } });
+    await Promise.all(worktrees.map((worktree, index) => manager.push(worktree, `ai/BUG-00000${index + 1}-fix`)));
+    expect(maxActiveGitOperations).toBe(1);
+    expect(remoteAdds).toBe(1);
+    expect(ensureCalls).toEqual(['storefront', 'storefront']);
+  });
   it('checks a candidate patch against the exact base and removes its temporary file', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-candidate-')); const repo = path.join(root, 'repo'); const wtRoot = path.join(root, 'worktrees'); const wt = path.join(wtRoot, 'BUG-000001');
     fs.mkdirSync(path.join(repo, '.git'), { recursive: true }); fs.mkdirSync(path.join(wt, '.git'), { recursive: true });

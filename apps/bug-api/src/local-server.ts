@@ -8,7 +8,8 @@ import { EnvironmentResolver } from '@llmbugfix/environment-resolver';
 import { EnvironmentRunner } from '@llmbugfix/environment-runner';
 import { IntakeService, OpenAICompatibleDocumentReconciler, OpenAICompatibleIntakeModel } from '@llmbugfix/intake-agent';
 import { JobQueue } from '@llmbugfix/job-queue';
-import { PiAgentRunner } from '@llmbugfix/pi-runner';
+import { createPiAgentRunnerFactory, type PiBackendDefinition } from '@llmbugfix/pi-runner';
+import { loadBackendRegistry, resolveBackendApiKey } from '@llmbugfix/llm-dispatcher';
 import { RepoManager, GitLabPushTarget } from '@llmbugfix/repo-manager';
 import { createLogger, parseConfig, parseWeeklyEmailConfig } from '@llmbugfix/shared';
 import { CommandRunner, Validator } from '@llmbugfix/validator';
@@ -62,19 +63,31 @@ const config = parseConfig();
 const weeklyEmailConfig = parseWeeklyEmailConfig();
 const db = openDatabase(config.DATABASE_PATH);
 const repo = new SQLiteBugRepository(db);
-const queue = new JobQueue(repo, path.join(config.DATA_ROOT, 'queue'), { autoAcquireLock: true });
+const leaseTimeoutMs = positiveInteger(process.env.JOB_LEASE_TIMEOUT_MS, 300_000, 'JOB_LEASE_TIMEOUT_MS');
+const heartbeatIntervalMs = positiveInteger(process.env.JOB_HEARTBEAT_INTERVAL_MS, 15_000, 'JOB_HEARTBEAT_INTERVAL_MS');
+if (heartbeatIntervalMs >= leaseTimeoutMs) throw new Error('JOB_HEARTBEAT_INTERVAL_MS must be less than JOB_LEASE_TIMEOUT_MS');
+const maxConcurrentJobs = positiveInteger(process.env.DISPATCHER_MAX_CONCURRENT_JOBS, 1, 'DISPATCHER_MAX_CONCURRENT_JOBS');
+const queue = new JobQueue(repo, path.join(config.DATA_ROOT, 'queue'), { autoAcquireLock: true, leaseTimeoutMs });
 const attachments = new AttachmentService(path.join(config.DATA_ROOT, 'attachments'), { maxBytes: config.MAX_ATTACHMENT_BYTES });
-const endpointUrl = process.env.LLM_ENDPOINT_URL?.trim();
-const model = process.env.LLM_MODEL?.trim();
-if (Boolean(endpointUrl) !== Boolean(model)) throw new Error('LLM_ENDPOINT_URL and LLM_MODEL must be configured together');
+// The registry is the one bootstrap source for all LLM roles.  With no
+// registry or legacy endpoint configured it intentionally yields an empty
+// pool, preserving the queue-only/UI-only startup mode.
+const backendRegistry = loadBackendRegistry({ env: process.env });
+const configuredBackends = backendRegistry.listBackends();
+const intakeBackend = backendRegistry.getIntakeBackend();
+const endpointUrl = intakeBackend?.endpointUrl;
+const model = intakeBackend?.model;
 // Pi's bash tool is not a sandbox. Require an explicit host-level sandbox
 // profile before starting the real Pi repair worker.
 const sandboxProfile = process.env.PI_SANDBOX_PROFILE?.trim();
-const llmEnabled = Boolean(endpointUrl && model);
-const workerEnabled = Boolean(llmEnabled && sandboxProfile);
+const llmEnabled = configuredBackends.length > 0;
+const intakeEnabled = Boolean(intakeBackend);
+const workerBackends = configuredBackends.filter((backend) => backend.enabled && !backend.draining && (backend.roles.includes('fixer') || backend.roles.includes('reviewer')));
+const workerEnabled = Boolean(workerBackends.length && sandboxProfile);
 let environmentResolver: EnvironmentResolver | undefined;
 let intake: IntakeService | undefined;
 let orchestrator: Orchestrator | undefined;
+let piRunnerFactory: ReturnType<typeof createPiAgentRunnerFactory> | undefined;
 let environments: { listProfiles: () => unknown[]; resolveProfile: (target: string, requestedProfileId?: string) => unknown; provisionProfile: (proposal: { name?: string; repositoryUrl?: string; defaultBranch?: string; target: 'frontend' | 'backend'; setupCommands?: string[]; validationCommands?: string[] }) => Promise<{ id: string; target: 'frontend' | 'backend' }> } | undefined;
 
 // Real intake is useful on its own: it can interview the tester and create a
@@ -87,13 +100,16 @@ if (llmEnabled) {
   const configuredCatalog = process.env.ENVIRONMENT_CONFIG_PATH?.trim() || path.resolve(config.DATA_ROOT, 'environment-catalog.yaml');
   environmentResolver = new EnvironmentResolver(configuredCatalog, process.cwd(), { env: process.env, allowMissingConfig: true, profileStorePath: generatedProfilesPath });
   const profiles = environmentResolver.listProfiles();
-  const intakeRequirements = loadIntakeInstructions(process.env.INTAKE_CONFIG_PATH ?? 'config/bug-intake.md');
-  const allowedProjects = profiles.map(({ id, name, target }) => ({ id, name, target }));
-  const instructions = `${intakeRequirements}\n\nExisting project profiles (when applicable, use the exact id as environmentProfileId):\n${JSON.stringify(allowedProjects, null, 2)}\n\nFor every report, an explicit remote Git clone address is required in the current draft, including when an existing profile is selected. A profile id never replaces it. Ask the tester for the remote when absent and return it in environmentProfile.repositoryUrl so the server can clone or verify it locally after confirmation.`;
-  const intakeTimeoutMs = positiveInteger(process.env.INTAKE_LLM_TIMEOUT_MS, 60_000, 'INTAKE_LLM_TIMEOUT_MS');
   const intakeLlmLogger = process.env.INTAKE_LLM_LOG === '1' ? createLogger('intake-llm') : undefined;
-  const llmOptions = { baseUrl: endpointUrl!, model: model!, ...(process.env.LLM_API_KEY?.trim() ? { apiKey: process.env.LLM_API_KEY.trim() } : {}), intakeInstructions: instructions, timeoutMs: intakeTimeoutMs, ...(intakeLlmLogger ? { logger: intakeLlmLogger } : {}) };
-  intake = new IntakeService(new OpenAICompatibleIntakeModel(llmOptions), new OpenAICompatibleDocumentReconciler(llmOptions));
+  if (intakeBackend) {
+    const intakeRequirements = loadIntakeInstructions(process.env.INTAKE_CONFIG_PATH ?? 'config/bug-intake.md');
+    const allowedProjects = profiles.map(({ id, name, target }) => ({ id, name, target }));
+    const instructions = `${intakeRequirements}\n\nExisting project profiles (when applicable, use the exact id as environmentProfileId):\n${JSON.stringify(allowedProjects, null, 2)}\n\nFor every report, an explicit remote Git clone address is required in the current draft, including when an existing profile is selected. A profile id never replaces it. Ask the tester for the remote when absent and return it in environmentProfile.repositoryUrl so the server can clone or verify it locally after confirmation.`;
+    const intakeTimeoutMs = positiveInteger(process.env.INTAKE_LLM_TIMEOUT_MS, 60_000, 'INTAKE_LLM_TIMEOUT_MS');
+    const intakeApiKey = resolveBackendApiKey(intakeBackend, process.env);
+    const llmOptions = { baseUrl: endpointUrl!, model: model!, ...(intakeApiKey ? { apiKey: intakeApiKey } : {}), intakeInstructions: instructions, timeoutMs: intakeTimeoutMs, ...(intakeLlmLogger ? { logger: intakeLlmLogger } : {}) };
+    intake = new IntakeService(new OpenAICompatibleIntakeModel(llmOptions), new OpenAICompatibleDocumentReconciler(llmOptions));
+  }
 
   const worktreesRoot = path.resolve(config.DATA_ROOT, 'worktrees');
   const repositoriesRoot = path.resolve(config.DATA_ROOT, 'repositories');
@@ -106,7 +122,7 @@ if (llmEnabled) {
   const ownPushTarget = gitlabUrl ? new GitLabPushTarget({
     baseUrl: gitlabUrl,
     account: process.env.GITLAB_ACCOUNT?.trim() || 'codigger-llm',
-    password: process.env.GITLAB_PASSWORD?.trim() || 'Engine#llm',
+    ...(process.env.GITLAB_PASSWORD?.trim() ? { password: process.env.GITLAB_PASSWORD.trim() } : {}),
   }) : undefined;
   const repoManager = new RepoManager({ worktreesRoot, repositoryRoots: repositories, cloneRoot: repositoriesRoot, allowedRemoteHosts, ownPushTarget });
   for (const repository of repositories) repoManager.validateRepoUrl(repository);
@@ -139,17 +155,35 @@ if (llmEnabled) {
   if (workerEnabled) {
     const commandRunner = new CommandRunner({ allowedCwdRoots: [worktreesRoot] });
     const environmentRunner = new EnvironmentRunner({ commandRunner, commandTimeoutMs: positiveInteger(process.env.ENVIRONMENT_TIMEOUT_MS, 600_000, 'ENVIRONMENT_TIMEOUT_MS') });
-    const agentRunner = new PiAgentRunner({
-      endpointUrl: endpointUrl!, model: model!, apiKey: process.env.LLM_API_KEY?.trim() || undefined,
-      fixerTimeoutMs: positiveInteger(process.env.FIXER_TIMEOUT_MS, 2_700_000, 'FIXER_TIMEOUT_MS'),
-      reviewerTimeoutMs: positiveInteger(process.env.REVIEWER_TIMEOUT_MS, 900_000, 'REVIEWER_TIMEOUT_MS'),
+    const fixerTimeoutMs = positiveInteger(process.env.FIXER_TIMEOUT_MS, 2_700_000, 'FIXER_TIMEOUT_MS');
+    const reviewerTimeoutMs = positiveInteger(process.env.REVIEWER_TIMEOUT_MS, 900_000, 'REVIEWER_TIMEOUT_MS');
+    const piBackends: PiBackendDefinition[] = workerBackends.map((backend) => ({
+      id: backend.id,
+      endpointUrl: backend.endpointUrl,
+      model: backend.model,
+      ...(backend.apiKeyEnv ? { apiKeyEnv: backend.apiKeyEnv } : {}),
+      fixerTimeoutMs: backend.fixerTimeoutMs ?? fixerTimeoutMs,
+      reviewerTimeoutMs: backend.reviewerTimeoutMs ?? reviewerTimeoutMs,
+    }));
+    piRunnerFactory = createPiAgentRunnerFactory(piBackends, {
+      env: process.env,
       requireSandbox: true,
       sandboxProfile,
       bashShellPath: process.env.PI_BASH_SHELL?.trim() || undefined,
       confineWorkspace: process.env.PI_CONFINE_WORKSPACE === '1',
       ...(intakeLlmLogger ? { logger: createLogger('pi-agent') } : {}),
     });
-    orchestrator = new Orchestrator(config, repo, queue, environmentResolver, repoManager, environmentRunner, agentRunner, new Validator(commandRunner), { dryRun: process.env.DRY_RUN !== 'false' });
+    const defaultWorkerBackend = piBackends.find((backend) => backend.id === intakeBackend?.id) ?? piBackends[0];
+    if (!defaultWorkerBackend) throw new Error('No enabled fixer/reviewer backend is configured');
+    const agentRunner = piRunnerFactory.get(defaultWorkerBackend.id);
+    orchestrator = new Orchestrator(config, repo, queue, environmentResolver, repoManager, environmentRunner, agentRunner, new Validator(commandRunner), {
+      dryRun: process.env.DRY_RUN !== 'false',
+      dispatcher: backendRegistry,
+      runnerFactory: piRunnerFactory,
+      maxConcurrentJobs,
+      leaseTimeoutMs,
+      heartbeatIntervalMs,
+    });
   }
 }
 const pageRenderer = (pathname: string) => resolveWebRoute(pathname);
@@ -159,7 +193,26 @@ delete apiEnvironment.WEEKLY_EMAIL_USERNAME;
 delete apiEnvironment.WEEKLY_EMAIL_PASSWORD;
 delete apiEnvironment.WEEKLY_EMAIL_RECIPIENTS;
 delete apiEnvironment.WEEKLY_EMAIL_ALLOW_INSECURE_TLS;
-const api = new BugApiServer({ ...apiEnvironment, ...config, DRY_RUN: process.env.DRY_RUN ?? true }, { repo, intake, queue, attachments, environments: environments ?? environmentResolver, pageRenderer });
+const dispatcherCapabilities = (): unknown => {
+  const health = backendRegistry.health();
+  const healthById = new Map(health.map((item) => [item.backendId, item]));
+  return {
+    dispatcher: { loaded: true, backendCount: configuredBackends.length, health },
+    capabilities: configuredBackends.map((backend) => ({
+      id: backend.id,
+      roles: backend.roles,
+      taskTypes: backend.taskTypes,
+      targets: backend.targets,
+      capabilities: backend.capabilities,
+      qualityTiers: backend.qualityTiers,
+      maxConcurrency: backend.maxConcurrency,
+      enabled: backend.enabled,
+      draining: backend.draining,
+      status: healthById.get(backend.id)?.status ?? 'closed',
+    })),
+  };
+};
+const api = new BugApiServer({ ...apiEnvironment, ...config, DRY_RUN: process.env.DRY_RUN ?? true }, { repo, intake, queue, attachments, environments: environments ?? environmentResolver, pageRenderer, capabilities: dispatcherCapabilities });
 const weeklyScheduler = weeklyEmailConfig.enabled ? new WeeklyReportScheduler(
   { now: () => new Date() },
   new SQLiteWeeklyReportDeliveryRepository(db),
@@ -174,7 +227,7 @@ if (weeklyScheduler) void weeklyScheduler.start();
 else console.log('每周邮件未启用');
 if (weeklyEmailConfig.enabled && weeklyEmailConfig.value.allowInsecureTls) console.warn('WARNING: weekly email TLS certificate and hostname verification are disabled; use only on an isolated internal SMTP network.');
 console.log(`LLM Bugfix local verification server is ready at http://${host}:${port}`);
-console.log(workerEnabled ? `Real Intake and Pi repair worker are enabled with model ${model}.` : llmEnabled ? `Real Intake is enabled with model ${model}; submitted reports stay in the local queue until PI_SANDBOX_PROFILE enables the externally isolated Pi worker.` : 'LLM and repair worker are disabled; submitted reports stay in the local queue. Configure LLM_ENDPOINT_URL and LLM_MODEL to enable Intake.');
+console.log(workerEnabled ? `LLM backends are loaded; Intake${intakeEnabled ? '' : ' is disabled'}, and the Pi repair worker is enabled.` : intakeEnabled ? `Real Intake is enabled with model ${model}; submitted reports stay in the local queue until PI_SANDBOX_PROFILE enables the externally isolated Pi worker.` : llmEnabled ? 'LLM backends are loaded without an Intake backend; submitted reports stay in the local queue.' : 'LLM and repair worker are disabled; submitted reports stay in the local queue. Configure LLM_BACKENDS_CONFIG_PATH or the legacy LLM_ENDPOINT_URL and LLM_MODEL pair to enable Intake.');
 if (llmEnabled && !sandboxProfile) console.warn('WARNING: real Pi repair worker disabled; set PI_SANDBOX_PROFILE to an externally enforced sandbox profile before enabling Pi bash.');
 
 let closing = false;

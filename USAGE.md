@@ -59,9 +59,13 @@ cp .env.example .env
 | `PI_REVIEWER_MAX_REPEATED_TOOL_CALLS` / `PI_REVIEWER_CLOSEOUT_GRACE_MS` | `4` / `15000` | Reviewer 对应重复调用和收尾宽限期 |
 | `ENVIRONMENT_TIMEOUT_MS` | `600000` | 宿主传给环境执行器的命令超时，10 分钟 |
 | `PIPELINE_TIMEOUT_MS` | `5400000` | 流程总超时，90 分钟（由宿主负责传递/监管） |
-| `LLM_ENDPOINT_URL` | 空 | OpenAI-compatible base URL；与 `LLM_MODEL` 同时配置后启用真实 Intake 和 Pi worker |
-| `LLM_MODEL` | 空 | endpoint 提供的模型 id |
-| `LLM_API_KEY` | 空 | 可选 endpoint credential；不得写入 prompt、日志或产物 |
+| `DISPATCHER_MAX_CONCURRENT_JOBS` | `1` | 单进程可同时运行的 Pipeline 数；显式增大后才启用多任务并发 |
+| `JOB_LEASE_TIMEOUT_MS` | `3600000` | Queue lease 有效期；过期 Job 标记 `INTERRUPTED`，需人工 retry |
+| `JOB_HEARTBEAT_INTERVAL_MS` | `15000` | Worker lease 心跳周期，应小于 lease timeout |
+| `LLM_BACKENDS_CONFIG_PATH` | 空 | Backend Registry YAML 路径；集中声明 Intake/Fixer/Reviewer 后端、能力和容量 |
+| `LLM_ENDPOINT_URL` | 空 | Registry 未配置时的 legacy OpenAI-compatible base URL；必须与 `LLM_MODEL` 一起设置 |
+| `LLM_MODEL` | 空 | legacy endpoint 提供的模型 id；legacy backend 容量固定为 1 |
+| `LLM_API_KEY` | 空 | legacy endpoint credential；可选，不得写入 prompt、日志或产物 |
 | `INTAKE_LLM_TIMEOUT_MS` | `60000` | Intake 和 Document Reconciler 的 LLM 请求超时，60 秒；必须是正整数 |
 | `PI_SANDBOX_PROFILE` | 空 | 外部宿主/容器隔离配置名称；未设置时真实 Pi worker fail-closed，不会启动 |
 | `INTAKE_CONFIG_PATH` | `config/bug-intake.md` | 测试人员必须提供的信息和追问规则 |
@@ -72,9 +76,43 @@ cp .env.example .env
 | `GIT_ALLOWED_HOSTS` | `localhost` | 逗号分隔的 Git 主机白名单 |
 | `GITLAB_URL` | `http://172.29.100.126` | 自己账号私有镜像仓库所在的 GitLab 地址（见 `docs/gitlab-private-repo-api.md`）；设为空字符串则回退推送到 origin |
 | `GITLAB_ACCOUNT` | `codigger-llm` | 私有镜像仓库所属账号；PAT 优先从 `~/.git-credentials` 读取 |
-| `GITLAB_PASSWORD` | `Engine#llm` | 仅在 `~/.git-credentials` 没有 PAT 时，通过 Web 登录自动生成 PAT 并写回凭据文件 |
+| `GITLAB_PASSWORD` | 未设置 | 仅显式配置时，在 credential store 没有 PAT 时通过 Web 登录生成 PAT；源码没有默认密码 |
 
 `packages/shared` 的 `parseConfig()` 解析基础存储配置；`pnpm dev` 的 bootstrap 读取其余变量并接线真实 Adapter。`ENVIRONMENT_CONFIG_PATH` 不是动态流程的前置条件：省略它时，服务仍可使用确认后写入 `DATA_ROOT/generated-environments.yaml` 的 Profile。不要把密码、Token、Cookie、API key 或私钥写入 `.env` 以外的 Bug 描述、附件、Profile、日志和产物。
+
+### 外部 REST API v1
+
+外部系统以一次异步请求提交任务，随后通过轮询资源和事件游标获取进度；完整契约见 `GET /openapi.json`（OpenAPI 3.1）。当前版本不包含鉴权、限流、Webhook 或 SSE。
+
+```bash
+curl -i -X POST http://127.0.0.1:8033/api/v1/tasks \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: order-1234-fix-login' \
+  --data '{
+    "taskType":"bugfix",
+    "title":"修复登录按钮",
+    "executionTarget":"frontend",
+    "repository":{"cloneUrl":"https://git.example.test/team/project.git","baseBranch":"main"},
+    "actualBehavior":"点击后无响应",
+    "expectedBehavior":"进入首页",
+    "reproductionSteps":["打开登录页","点击登录"],
+    "routing":{"priority":"normal","capabilityHints":["typescript","react"],"quality":"standard"}
+  }'
+```
+
+成功响应为 `202 Accepted`，并带 `Location: /api/v1/tasks/{taskId}`。重复提交相同 key 和请求体会返回同一个任务并标记 `idempotent: true`；相同 key 配不同请求体返回 `409 IDEMPOTENCY_CONFLICT`。服务不会在 HTTP 请求期间执行 clone、LLM、验证或 push。
+
+常用查询：
+
+```bash
+curl 'http://127.0.0.1:8033/api/v1/tasks/{taskId}'
+curl 'http://127.0.0.1:8033/api/v1/tasks/{taskId}/events?after=0&limit=100'
+curl 'http://127.0.0.1:8033/api/v1/tasks/{taskId}/result'
+curl -X POST 'http://127.0.0.1:8033/api/v1/tasks/{taskId}/cancel'
+curl -X POST 'http://127.0.0.1:8033/api/v1/tasks/{taskId}/retry'
+```
+
+`GET /result` 在任务未终止时返回 `202`；完成后只返回结构化 fix、validation、review、delivery 和 error，不暴露模型原始输出、服务端路径、endpoint 或凭据。Dry Run 成功的 delivery 为 `{ "type":"patch", "pushed":false, "branch":null, "commitSha":null }`。列表使用不透明 `cursor`（默认 20、最多 100），事件使用递增 `after` 游标（最多 100）。错误统一为 `{ "error": { "code", "message", "details" }, "requestId" }`。
 
 ### 环境 Profile 配置
 
@@ -138,6 +176,31 @@ pnpm dev
 `pnpm dev` 使用 esbuild 打包并监听 TypeScript 源码；每次成功重建会自动重启本地 Node 服务。esbuild 只负责快速转换，不做完整类型检查，因此提交前仍应运行 `pnpm typecheck`、`pnpm test` 和 `pnpm build`。`pnpm start` 会完成类型检查和生产打包，然后运行 `dist/local-server.mjs`，适合一次性手工验证。每次启动保留本地 `data/` 中的记录。若需要全新演示数据，请在服务停止后自行换一个 `DATA_ROOT`，例如 `DATA_ROOT=tmp-demo pnpm dev`。
 
 ### 5.2 启动真实 Intake 和 Pi worker
+
+多后端部署先写一个只包含非敏感配置的 YAML，例如：
+
+```yaml
+version: 1
+defaults:
+  intakeBackendId: local-fast
+backends:
+  - id: local-fast
+    endpointUrl: http://127.0.0.1:8001/v1
+    model: coder-fast
+    apiKeyEnv: LOCAL_FAST_API_KEY
+    roles: [intake, fixer, reviewer]
+    taskTypes: [bugfix, development]
+    targets: [frontend, backend]
+    capabilities: [typescript, react]
+    qualityTiers: [standard]
+    maxConcurrency: 2
+    weight: 1
+    enabled: true
+```
+
+然后设置 `LLM_BACKENDS_CONFIG_PATH=/absolute/path/backends.yaml`，并在进程环境中设置 `LOCAL_FAST_API_KEY`（若后端需要）。Dispatcher 会按角色、任务类型、目标、能力和质量过滤，再按加权最小负载选择后端；后端满载时等待容量，连续基础设施失败会熔断并在满足条件时自动切换。用户输入只能提供 capability hints，不能指定 backend、model 或 key。每个角色一次任务最多使用两个后端；合约错误、验证失败和 Reviewer reject 不会触发切换。
+
+若不需要 registry，仍可使用以下 legacy 配置；它会创建容量为 1 的 `legacy` backend：
 
 在 `.env` 中补齐以下值：
 

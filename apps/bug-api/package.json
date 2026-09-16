@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@llmbugfix/api-contract": "workspace:*",
     "@llmbugfix/attachment-service": "workspace:*",
     "@llmbugfix/bug-domain": "workspace:*",
     "@llmbugfix/bug-repository": "workspace:*",
@@ -17,6 +18,7 @@
     "@llmbugfix/intake-agent": "workspace:*",
     "@llmbugfix/intake-policy": "workspace:*",
     "@llmbugfix/job-queue": "workspace:*",
+    "@llmbugfix/llm-dispatcher": "workspace:*",
     "@llmbugfix/orchestrator": "workspace:*",
     "@llmbugfix/pi-runner": "workspace:*",
     "@llmbugfix/repo-manager": "workspace:*",

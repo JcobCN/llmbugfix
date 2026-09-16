@@ -19,6 +19,8 @@ export default defineConfig({
       '@llmbugfix/repo-manager': path.resolve(__dirname, 'packages/repo-manager/src/index.ts'),
       '@llmbugfix/environment-runner': path.resolve(__dirname, 'packages/environment-runner/src/index.ts'),
       '@llmbugfix/pi-runner': path.resolve(__dirname, 'packages/pi-runner/src/index.ts'),
+      '@llmbugfix/api-contract': path.resolve(__dirname, 'packages/api-contract/src/index.ts'),
+      '@llmbugfix/llm-dispatcher': path.resolve(__dirname, 'packages/llm-dispatcher/src/index.ts'),
       '@llmbugfix/validator': path.resolve(__dirname, 'packages/validator/src/index.ts'),
       '@llmbugfix/weekly-email-report': path.resolve(__dirname, 'packages/weekly-email-report/src/index.ts'),
       '@bug-agent/shared': path.resolve(__dirname, 'packages/shared/src/index.ts'),

@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@llmbugfix/api-contract": "workspace:*",
     "@llmbugfix/bug-domain": "workspace:*",
     "@llmbugfix/shared": "workspace:*",
     "@llmbugfix/weekly-email-report": "workspace:*",

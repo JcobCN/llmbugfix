@@ -9,6 +9,8 @@ import { IntakeService, applyDocumentReconciliation, mergeBugDocument, mergeDraf
 import { evaluateCompleteness, hasGitRepositoryAddress } from '@llmbugfix/intake-policy';
 import { createLogger, safeLogContext } from '@llmbugfix/shared';
 import { createAttachmentRoutes } from './attachment-routes.js';
+import { createV1Routes, type V1Routes } from './v1-routes.js';
+import { openapiDocument } from './openapi.js';
 
 type QueueJobLike = { id: string; bugId: string; status: string; attempt?: number; error?: string | null; startedAt?: string | null; finishedAt?: string | null; heartbeatAt?: string | null; workerId?: string | null };
 /** Public, deliberately bounded worker-log event shape.  The repository owns
@@ -49,7 +51,7 @@ export type PageResponse = {
 };
 export type PageRendererResult = string | PageResponse;
 export type PageRenderer = (pathname: string) => PageRendererResult | undefined;
-export type ApiDependencies = { repo: BugRepository; intake?: IntakeService; queue?: QueueLike; environments?: EnvironmentSource; attachments?: Parameters<typeof createAttachmentRoutes>[0]['attachments']; pageRenderer?: PageRenderer; documentStore?: BugDocumentStore };
+export type ApiDependencies = { repo: BugRepository; intake?: IntakeService; queue?: QueueLike; environments?: EnvironmentSource; attachments?: Parameters<typeof createAttachmentRoutes>[0]['attachments']; pageRenderer?: PageRenderer; documentStore?: BugDocumentStore; capabilities?: () => unknown };
 export type InjectRequest = { method?: string; url: string; headers?: Record<string, string>; body?: unknown };
 export type InjectResponse<T = unknown> = { status: number; headers: Record<string, string>; data: T; raw: string };
 export const DEFAULT_API_CONFIG = {
@@ -136,6 +138,7 @@ export class BugApiServer {
   private readonly apiConfig: ReturnType<typeof resolveApiConfig>;
   private readonly attachmentRoutes?: ReturnType<typeof createAttachmentRoutes>;
   private readonly documentStore?: BugDocumentStore;
+  private readonly v1Routes: V1Routes;
   private readonly logger = createLogger('bug-api');
   private readonly manualFields = new Map<string, Set<string>>();
   constructor(private readonly config: unknown, repoOrDeps?: SQLiteBugRepository | ApiDependencies, intake?: IntakeService, private readonly attachmentService?: unknown, queue?: QueueLike, envResolver?: EnvironmentSource) {
@@ -144,6 +147,14 @@ export class BugApiServer {
     if (!dependencyValue || typeof dependencyValue !== 'object') throw new Error('BugApiServer requires repository dependencies');
     if ('repo' in dependencyValue) { this.repo = dependencyValue.repo; this.intake = dependencyValue.intake ?? intake ?? new IntakeService(); this.environments = dependencyValue.environments; this.queue = dependencyValue.queue ?? queue; this.pageRenderer = dependencyValue.pageRenderer; this.attachmentRoutes = dependencyValue.attachments ? createAttachmentRoutes({ attachments: dependencyValue.attachments, repo: this.repo }) : undefined; this.documentStore = dependencyValue.documentStore ?? this.makeDocumentStore(this.repo); }
     else { this.repo = dependencyValue as SQLiteBugRepository; this.intake = intake ?? new IntakeService(); this.environments = envResolver; this.queue = queue; this.attachmentRoutes = this.attachmentService && typeof this.attachmentService === 'object' ? createAttachmentRoutes({ attachments: this.attachmentService as Parameters<typeof createAttachmentRoutes>[0]['attachments'], repo: this.repo }) : undefined; this.documentStore = this.makeDocumentStore(this.repo); }
+    this.v1Routes = createV1Routes({
+      repo: this.repo as import('./task-service.js').ExternalTaskRepository,
+      queue: this.queue as import('./task-service.js').ExternalTaskQueue | undefined,
+      dataRoot: String(this.apiConfig.DATA_ROOT),
+      dryRun: this.apiConfig.DRY_RUN === true,
+      allowedRepositoryHosts: String((this.apiConfig as Record<string, unknown>).REPOSITORY_ALLOWED_HOSTS ?? '').split(',').map((host) => host.trim()).filter(Boolean),
+      capabilities: 'repo' in dependencyValue ? dependencyValue.capabilities : undefined,
+    });
     this.server = http.createServer((request, response) => { void this.handle(request, response); });
   }
   private makeDocumentStore(repo: BugRepository): BugDocumentStore | undefined {
@@ -180,6 +191,8 @@ export class BugApiServer {
     if (request.method === 'OPTIONS') { send(response, 204, {}); return; }
     const parsed = new URL(request.url ?? '/', 'http://localhost'); const path = parsed.pathname; const method = request.method ?? 'GET';
     try {
+      if (path === '/openapi.json' && method === 'GET') { send(response, 200, openapiDocument); return; }
+      if (path === '/api/v1/capabilities' || path === '/api/v1/tasks' || path.startsWith('/api/v1/tasks/')) { await this.handleV1(request, response, parsed); return; }
       if (path === '/api/health' || path === '/api/health/live' || path === '/healthz') { send(response, 200, { status: 'ok', live: true, time: now() }); return; }
       if (path === '/api/health/ready' || path === '/readyz') {
         const ready = this.isReady(); send(response, ready ? 200 : 503, { status: ready ? 'ready' : 'not_ready', checks: { database: ready, queue: this.queue ? true : 'not_configured' }, config: { dryRun: this.apiConfig.DRY_RUN } }); return;
@@ -216,6 +229,18 @@ export class BugApiServer {
       if (page !== undefined) { sendPage(response, page); return; }
       send(response, 404, { error: 'Route not found' });
     } catch (error) { this.logger.error(safeLogContext({ path, method, error: error instanceof Error ? error.message : String(error) }), 'request failed'); send(response, error instanceof SyntaxError ? 400 : 500, { error: error instanceof Error ? error.message : String(error) }); }
+  }
+  private async handleV1(request: http.IncomingMessage, response: http.ServerResponse, parsed: URL): Promise<void> {
+    let body: unknown;
+    let bodyError: 'syntax' | 'shape' | undefined;
+    if (request.method === 'POST') {
+      try { body = await this.optionalBody(request); } catch (error) { bodyError = error instanceof SyntaxError ? 'syntax' : 'shape'; }
+    }
+    const result = await this.v1Routes.handle({ method: request.method ?? 'GET', pathname: parsed.pathname, query: parsed.searchParams, headers: request.headers, body, bodyError });
+    if (!result) { send(response, 404, { error: { code: 'INVALID_REQUEST', message: 'Route not found', details: {} }, requestId: newId() }); return; }
+    const headers: Record<string, string> = { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, idempotency-key', 'access-control-allow-methods': 'GET,POST,OPTIONS', ...(result.headers ?? {}) };
+    response.writeHead(result.status, headers);
+    response.end(JSON.stringify(result.body));
   }
   private async optionalBody(request: http.IncomingMessage): Promise<Record<string, unknown>> { if (request.method !== 'POST' && request.method !== 'PATCH' && request.method !== 'PUT') return {}; return jsonBody(request); }
   private readDocument(id: string): StoredDocumentSnapshot | null {

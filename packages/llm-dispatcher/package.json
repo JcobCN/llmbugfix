@@ -1,5 +1,5 @@
 {
-  "name": "@llmbugfix/job-queue",
+  "name": "@llmbugfix/llm-dispatcher",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@llmbugfix/api-contract": "workspace:*",
-    "@llmbugfix/bug-repository": "workspace:*",
-    "@llmbugfix/shared": "workspace:*"
+    "yaml": "^2.9.0",
+    "zod": "^3.25.76"
   }
 }

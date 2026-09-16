@@ -20,7 +20,13 @@ class FakeCommandRunner {
     const text = args.join(' ');
     if (args[0] === 'worktree' && args[1] === 'add') {
       const targetDir = args[4];
-      if (targetDir) fs.mkdirSync(targetDir, { recursive: true });
+      if (targetDir) {
+        fs.mkdirSync(targetDir, { recursive: true });
+        // RepoManager resolves the real worktree before mutating Git metadata.
+        // Keep this fake checkout shaped like a normal linked worktree so the
+        // push-enabled path exercises the same repository safety gate.
+        fs.mkdirSync(path.join(targetDir, '.git'), { recursive: true });
+      }
       return { command, args, exitCode: 0, stdout: 'Preparing worktree\n', stderr: '', timedOut: false, timeout: false, aborted: false };
     }
     if (text.includes('branch --show-current')) {

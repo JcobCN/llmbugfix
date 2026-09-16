@@ -54,6 +54,9 @@ importers:
 
   apps/bug-api:
     dependencies:
+      '@llmbugfix/api-contract':
+        specifier: workspace:*
+        version: link:../../packages/api-contract
       '@llmbugfix/attachment-service':
         specifier: workspace:*
         version: link:../../packages/attachment-service
@@ -78,6 +81,9 @@ importers:
       '@llmbugfix/job-queue':
         specifier: workspace:*
         version: link:../../packages/job-queue
+      '@llmbugfix/llm-dispatcher':
+        specifier: workspace:*
+        version: link:../../packages/llm-dispatcher
       '@llmbugfix/orchestrator':
         specifier: workspace:*
         version: link:../orchestrator
@@ -119,6 +125,9 @@ importers:
       '@llmbugfix/job-queue':
         specifier: workspace:*
         version: link:../../packages/job-queue
+      '@llmbugfix/llm-dispatcher':
+        specifier: workspace:*
+        version: link:../../packages/llm-dispatcher
       '@llmbugfix/pi-runner':
         specifier: workspace:*
         version: link:../../packages/pi-runner
@@ -141,6 +150,12 @@ importers:
         specifier: workspace:*
         version: link:../vision-provider
 
+  packages/api-contract:
+    dependencies:
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
   packages/bug-domain:
     dependencies:
       '@llmbugfix/shared':
@@ -152,6 +167,9 @@ importers:
 
   packages/bug-repository:
     dependencies:
+      '@llmbugfix/api-contract':
+        specifier: workspace:*
+        version: link:../api-contract
       '@llmbugfix/bug-domain':
         specifier: workspace:*
         version: link:../bug-domain
@@ -212,12 +230,27 @@ importers:
 
   packages/job-queue:
     dependencies:
+      '@llmbugfix/api-contract':
+        specifier: workspace:*
+        version: link:../api-contract
       '@llmbugfix/bug-repository':
         specifier: workspace:*
         version: link:../bug-repository
       '@llmbugfix/shared':
         specifier: workspace:*
         version: link:../shared
+
+  packages/llm-dispatcher:
+    dependencies:
+      '@llmbugfix/api-contract':
+        specifier: workspace:*
+        version: link:../api-contract
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
 
   packages/pi-runner:
     dependencies:

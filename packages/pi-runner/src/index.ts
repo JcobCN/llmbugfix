@@ -89,6 +89,8 @@ export interface FixerInput {
   attachments?: Array<{ id: string; text?: string; analysis?: string }>;
   signal?: AbortSignal;
   progress?: PiProgressSink;
+  /** Selected backend is normally carried by the runner factory. */
+  backendId?: string;
 }
 
 export interface ReviewerInput {
@@ -100,6 +102,8 @@ export interface ReviewerInput {
   validation: DeterministicValidation;
   signal?: AbortSignal;
   progress?: PiProgressSink;
+  /** Selected backend is normally carried by the runner factory. */
+  backendId?: string;
 }
 
 export interface AgentRunner {
@@ -163,6 +167,9 @@ export interface PiSessionFactoryOptions {
   sessionManager: SessionManager;
   settingsManager: SettingsManager;
   agentDir: string;
+  /** The backend identity is available to instrumentation, never to prompts. */
+  backendId?: string;
+  providerId?: string;
   /** Extra tool definitions that replace the built-in tools with the same name. */
   customTools?: ToolDefinition[];
 }
@@ -176,6 +183,10 @@ export interface PiAgentRunnerOptions {
   /** Model id exposed by the configured endpoint. */
   model?: string;
   apiKey?: string;
+  /** Stable identity used to isolate this runner's Pi provider registration. */
+  backendId?: string;
+  /** Explicit Pi provider id; defaults to a backend-scoped id. */
+  providerId?: string;
   fixerTimeoutMs?: number;
   reviewerTimeoutMs?: number;
   safety?: string;
@@ -454,6 +465,8 @@ function reviewerPrompt(input: ReviewerInput): string {
 }
 
 export class PiAgentRunner implements AgentRunner {
+  readonly backendId?: string;
+  private readonly providerId: string;
   private readonly endpoint: string;
   private readonly modelName: string;
   private readonly fixerTimeoutMs: number;
@@ -480,6 +493,8 @@ export class PiAgentRunner implements AgentRunner {
   private runtimePromise?: Promise<PiModelRuntime>;
 
   constructor(options: PiAgentRunnerOptions = {}) {
+    this.backendId = options.backendId?.trim() || undefined;
+    this.providerId = options.providerId?.trim() || (this.backendId ? `${PROVIDER_ID}-${this.backendId.replace(/[^a-zA-Z0-9._-]/gu, '-')}` : PROVIDER_ID);
     const endpoint = options.endpointUrl ?? options.endpoint ?? process.env.LLM_ENDPOINT_URL;
     const model = options.model ?? process.env.LLM_MODEL;
     this.endpoint = endpoint ? endpointBaseUrl(endpoint) : '';
@@ -575,7 +590,7 @@ export class PiAgentRunner implements AgentRunner {
         }));
         if (!this.endpoint) throw new Error('LLM endpoint URL is required (set LLM_ENDPOINT_URL)');
         if (!this.modelName) throw new Error('LLM model is required (set LLM_MODEL)');
-        runtime.registerProvider(PROVIDER_ID, {
+        runtime.registerProvider(this.providerId, {
           name: 'LLM Bugfix endpoint',
           baseUrl: this.endpoint,
           apiKey: this.apiKey,
@@ -594,7 +609,7 @@ export class PiAgentRunner implements AgentRunner {
             maxTokens: DEFAULT_MAX_TOKENS,
           }],
         });
-        if (!runtime.getModel(PROVIDER_ID, this.modelName)) throw new Error(`Pi model is unavailable: ${PROVIDER_ID}/${this.modelName}`);
+        if (!runtime.getModel(this.providerId, this.modelName)) throw new Error(`Pi model is unavailable: ${this.providerId}/${this.modelName}`);
         return runtime;
       })();
     }
@@ -605,8 +620,8 @@ export class PiAgentRunner implements AgentRunner {
     if (role === 'fixer' && this.requireSandbox && !this.sandboxProfile) throw new Error('Pi fixer is disabled: PI_SANDBOX_PROFILE must name an externally enforced sandbox');
     if (signal?.aborted) throw new Error('Pi session cancelled');
     const runtime = await this.getRuntime();
-    const model = runtime.getModel(PROVIDER_ID, this.modelName);
-    if (!model) throw new Error(`Pi model is unavailable: ${PROVIDER_ID}/${this.modelName}`);
+    const model = runtime.getModel(this.providerId, this.modelName);
+    if (!model) throw new Error(`Pi model is unavailable: ${this.providerId}/${this.modelName}`);
     const customTools = role === 'fixer' ? this.fixerConfinedTools(cwd, completion) : [];
     // `createAgentSession({ tools })` doubles as Pi's allowed-tool allowlist;
     // include the SDK completion tool there or Pi would register but hide it.
@@ -624,6 +639,8 @@ export class PiAgentRunner implements AgentRunner {
         retry: { enabled: true, maxRetries: 2 },
       }),
       agentDir: this.agentDir,
+      ...(this.backendId ? { backendId: this.backendId } : {}),
+      providerId: this.providerId,
     });
     const session = sessionResult.session;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -833,10 +850,17 @@ export class PiAgentRunner implements AgentRunner {
 export class FakePiRunner implements AgentRunner {
   readonly fixerSessions: string[] = [];
   readonly reviewerSessions: string[] = [];
-  constructor(private readonly fixResult?: AgentFixResultChecked, private readonly reviewResult?: ReviewResultChecked) {}
+  /** Backend ids are deliberately observable in tests and never in prompts. */
+  readonly fixerBackendIds: string[] = [];
+  readonly reviewerBackendIds: string[] = [];
+  readonly backendId?: string;
+  constructor(private readonly fixResult?: AgentFixResultChecked, private readonly reviewResult?: ReviewResultChecked, options: { backendId?: string } | string = {}) {
+    this.backendId = typeof options === 'string' ? options : options.backendId;
+  }
   async runFixer(input: FixerInput): Promise<AgentFixResultChecked> {
     const sessionId = newId();
     this.fixerSessions.push(sessionId);
+    this.fixerBackendIds.push(input.backendId ?? this.backendId ?? 'fake');
     const result = StrictFixResultSchema.parse(this.fixResult ?? { bugKey: input.task.bugKey, status: 'fixed', confidence: 1, summary: 'Fake fixer result', rootCause: null, reproduced: true, regressionTestAdded: false, filesChanged: [], riskNotes: [], blockedReason: null, missingInformation: [] });
     await input.progress?.({ role: 'fixer', eventType: 'completed', summary: 'fixer completed' });
     return result;
@@ -854,8 +878,75 @@ export class FakePiRunner implements AgentRunner {
   async runReviewer(input: ReviewerInput): Promise<ReviewResultChecked> {
     const sessionId = newId();
     this.reviewerSessions.push(sessionId);
+    this.reviewerBackendIds.push(input.backendId ?? this.backendId ?? 'fake');
     const result = StrictReviewResultSchema.parse(this.reviewResult ?? { verdict: input.validation.passed ? 'approve' : 'reject', bugAddressed: input.validation.passed, regressionRisk: 'low', summary: 'Fake review result', findings: [] });
     await input.progress?.({ role: 'reviewer', eventType: 'completed', summary: 'reviewer completed' });
     return result;
   }
 }
+
+/** Minimal backend shape accepted by the runner factory. It intentionally
+ * mirrors the dispatcher config without creating a package dependency cycle. */
+export interface PiBackendDefinition {
+  id: string;
+  endpointUrl: string;
+  model: string;
+  apiKey?: string;
+  apiKeyEnv?: string;
+  fixerTimeoutMs?: number;
+  reviewerTimeoutMs?: number;
+}
+
+export interface PiAgentRunnerFactoryOptions extends Omit<PiAgentRunnerOptions, 'endpoint' | 'endpointUrl' | 'model' | 'apiKey' | 'backendId' | 'providerId' | 'fixerTimeoutMs' | 'reviewerTimeoutMs'> {
+  env?: NodeJS.ProcessEnv;
+  /** Shared runtime is allowed; provider IDs remain backend-scoped. */
+  modelRuntime?: PiModelRuntime;
+  modelRuntimeFactory?: () => Promise<PiModelRuntime>;
+}
+
+/**
+ * Creates and caches one Pi runner per backend id. Each runner has its own
+ * provider/model registration and registration is single-flight inside the
+ * runner, so concurrent first calls cannot register a provider twice.
+ */
+export class PiAgentRunnerFactory {
+  private readonly backends = new Map<string, PiBackendDefinition>();
+  private readonly runners = new Map<string, PiAgentRunner>();
+  private readonly options: PiAgentRunnerFactoryOptions;
+  private readonly env: NodeJS.ProcessEnv;
+
+  constructor(backends: readonly PiBackendDefinition[], options: PiAgentRunnerFactoryOptions = {}) {
+    this.options = options;
+    this.env = options.env ?? process.env;
+    for (const backend of backends) {
+      if (this.backends.has(backend.id)) throw new Error(`Duplicate Pi backend id: ${backend.id}`);
+      if (!backend.id.trim() || !backend.endpointUrl.trim() || !backend.model.trim()) throw new Error('Pi backend id, endpointUrl, and model are required');
+      this.backends.set(backend.id, { ...backend });
+    }
+  }
+
+  get(backendId: string): PiAgentRunner {
+    const cached = this.runners.get(backendId);
+    if (cached) return cached;
+    const backend = this.backends.get(backendId);
+    if (!backend) throw new Error(`Unknown Pi backend: ${backendId}`);
+    const apiKey = backend.apiKey ?? (backend.apiKeyEnv ? this.env[backend.apiKeyEnv]?.trim() || undefined : undefined);
+    const runner = new PiAgentRunner({
+      ...this.options,
+      endpointUrl: backend.endpointUrl,
+      model: backend.model,
+      ...(apiKey ? { apiKey } : {}),
+      backendId: backend.id,
+      ...(backend.fixerTimeoutMs === undefined ? {} : { fixerTimeoutMs: backend.fixerTimeoutMs }),
+      ...(backend.reviewerTimeoutMs === undefined ? {} : { reviewerTimeoutMs: backend.reviewerTimeoutMs }),
+    });
+    this.runners.set(backendId, runner);
+    return runner;
+  }
+
+  has(backendId: string): boolean { return this.backends.has(backendId); }
+  listBackendIds(): string[] { return [...this.backends.keys()]; }
+  clear(): void { this.runners.clear(); }
+}
+
+export const createPiAgentRunnerFactory = (backends: readonly PiBackendDefinition[], options: PiAgentRunnerFactoryOptions = {}): PiAgentRunnerFactory => new PiAgentRunnerFactory(backends, options);
