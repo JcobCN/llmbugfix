@@ -93,6 +93,8 @@ curl -i -X POST http://127.0.0.1:8033/api/v1/tasks \
     "title":"修复登录按钮",
     "executionTarget":"frontend",
     "repository":{"cloneUrl":"https://git.example.test/team/project.git","baseBranch":"main"},
+    "dev_env_snapshot":"r35.1",
+    "dev_env_special":"raw-spofer-pel v2.0.200",
     "actualBehavior":"点击后无响应",
     "expectedBehavior":"进入首页",
     "reproductionSteps":["打开登录页","点击登录"],

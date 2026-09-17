@@ -238,7 +238,7 @@ export const OPENAPI_DOCUMENT = {
       ExternalBugfixTask: {
         type: 'object',
         additionalProperties: false,
-        required: ['taskType', 'title', 'executionTarget', 'repository', 'actualBehavior', 'expectedBehavior', 'reproductionSteps'],
+        required: ['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'dev_env_special', 'actualBehavior', 'expectedBehavior', 'reproductionSteps'],
         properties: {
           taskType: { const: 'bugfix' },
           // zod trims this field before applying min/max; `\\S` keeps
@@ -246,6 +246,8 @@ export const OPENAPI_DOCUMENT = {
           title: { type: 'string', minLength: 1, maxLength: 500, pattern: '\\S' },
           executionTarget: { type: 'string', enum: ['frontend', 'backend'] },
           repository: schemaRef('RepositoryTarget'),
+          dev_env_snapshot: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S', description: 'Development environment release snapshot, for example r35.1.', examples: ['r35.1'] },
+          dev_env_special: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S', description: 'Special development environment component and version, for example raw-spofer-pel v2.0.200.', examples: ['raw-spofer-pel v2.0.200'] },
           actualBehavior: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S' },
           expectedBehavior: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S' },
           reproductionSteps: {
@@ -275,12 +277,14 @@ export const OPENAPI_DOCUMENT = {
       ExternalDevelopmentTask: {
         type: 'object',
         additionalProperties: false,
-        required: ['taskType', 'title', 'executionTarget', 'repository', 'objective', 'requirements', 'acceptanceCriteria'],
+        required: ['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'dev_env_special', 'objective', 'requirements', 'acceptanceCriteria'],
         properties: {
           taskType: { const: 'development' },
           title: { type: 'string', minLength: 1, maxLength: 500, pattern: '\\S' },
           executionTarget: { type: 'string', enum: ['frontend', 'backend'] },
           repository: schemaRef('RepositoryTarget'),
+          dev_env_snapshot: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S', description: 'Development environment release snapshot, for example r35.1.', examples: ['r35.1'] },
+          dev_env_special: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S', description: 'Special development environment component and version, for example raw-spofer-pel v2.0.200.', examples: ['raw-spofer-pel v2.0.200'] },
           objective: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S' },
           requirements: {
             type: 'array',

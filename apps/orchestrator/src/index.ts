@@ -196,7 +196,7 @@ export class Orchestrator {
   }
 
   private taskFor(bug: BugReport, profile: EnvironmentProfile, attachments = this.attachmentsFor(bug)): CodingTask {
-    const common = { bugKey: bug.bugKey, title: bug.title, executionTarget: profile.target, environmentProfileId: profile.id, environment: bug.environment.additionalInfo, attachments, reporterObservations: bug.observations, machineObservations: [], missingInformation: bug.intake.missingInformation, completenessScore: bug.intake.completenessScore };
+    const common = { bugKey: bug.bugKey, title: bug.title, executionTarget: profile.target, environmentProfileId: profile.id, dev_env_snapshot: bug.dev_env_snapshot, dev_env_special: bug.dev_env_special, environment: bug.environment.additionalInfo, attachments, reporterObservations: bug.observations, machineObservations: [], missingInformation: bug.intake.missingInformation, completenessScore: bug.intake.completenessScore };
     return CodingTaskSchema.parse(bug.taskType === 'development'
       ? { ...common, taskType: 'development', objective: bug.objective, requirements: bug.requirements, acceptanceCriteria: bug.acceptanceCriteria, nonGoals: bug.nonGoals, constraints: bug.constraints, referenceContext: bug.referenceContext }
       : { ...common, taskType: 'bugfix', actualBehavior: bug.actualBehavior, expectedBehavior: bug.expectedBehavior, reproductionSteps: bug.reproduction.steps, prerequisites: bug.reproduction.prerequisites, errorMessages: bug.evidence.errorMessages, stackTraces: bug.evidence.stackTraces, lastKnownGoodVersion: bug.regression.lastKnownGoodVersion, failingVersion: bug.regression.suspectedVersion, reporterHypotheses: bug.reporterHypotheses });

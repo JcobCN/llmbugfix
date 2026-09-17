@@ -43,6 +43,7 @@ describe('external REST API v1 routes', () => {
 
     const accepted = await routes().handle(request('POST', '/api/v1/tasks', {
       taskType: 'bugfix', title: 'Broken login', executionTarget: 'frontend', repository: { cloneUrl: 'https://git.example.test/team/project.git' },
+      dev_env_snapshot: 'r35.1', dev_env_special: 'raw-spofer-pel v2.0.200',
       actualBehavior: 'No response', expectedBehavior: 'Go home', reproductionSteps: ['Click login'],
     }, { 'Idempotency-Key': 'create-1' }));
     expect(accepted?.status).toBe(202);
@@ -62,6 +63,7 @@ describe('external REST API v1 routes', () => {
     for (const [index, cloneUrl] of remotes.entries()) {
       const response = await api.handle(request('POST', '/api/v1/tasks', {
         taskType: 'bugfix', title: 'Broken login', executionTarget: 'frontend', repository: { cloneUrl },
+        dev_env_snapshot: 'r35.1', dev_env_special: 'raw-spofer-pel v2.0.200',
         actualBehavior: 'No response', expectedBehavior: 'Go home', reproductionSteps: ['Click login'],
       }, { 'Idempotency-Key': `host-allowed-${index}` }));
       expect(response?.status).toBe(202);
@@ -76,6 +78,7 @@ describe('external REST API v1 routes', () => {
     for (const [index, cloneUrl] of rejectedRemotes.entries()) {
       const response = await api.handle(request('POST', '/api/v1/tasks', {
         taskType: 'bugfix', title: 'Broken login', executionTarget: 'frontend', repository: { cloneUrl },
+        dev_env_snapshot: 'r35.1', dev_env_special: 'raw-spofer-pel v2.0.200',
         actualBehavior: 'No response', expectedBehavior: 'Go home', reproductionSteps: ['Click login'],
       }, { 'Idempotency-Key': `host-rejected-${index}` }));
       expect(response?.status).toBe(400);
@@ -90,6 +93,7 @@ describe('external REST API v1 routes', () => {
         taskType: 'bugfix', title: 'Broken login', executionTarget: 'frontend', repository: {
           cloneUrl: 'https://git.example.test/team/project.git', baseBranch,
         },
+        dev_env_snapshot: 'r35.1', dev_env_special: 'raw-spofer-pel v2.0.200',
         actualBehavior: 'No response', expectedBehavior: 'Go home', reproductionSteps: ['Click login'],
       }, { 'Idempotency-Key': `branch-invalid-${index}` }));
       expect(response?.status).toBe(400);

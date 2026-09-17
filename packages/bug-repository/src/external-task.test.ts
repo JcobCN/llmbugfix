@@ -4,6 +4,7 @@ import { openDatabase, SQLiteBugRepository, IdempotencyConflictError } from './i
 
 const request = ExternalTaskCreateRequestSchema.parse({
   taskType: 'bugfix', title: 'Fix login', executionTarget: 'frontend', repository: { cloneUrl: 'https://git.example.test/team/project.git', baseBranch: 'main' },
+  dev_env_snapshot: 'r35.1', dev_env_special: 'raw-spofer-pel v2.0.200',
   actualBehavior: 'The button does nothing', expectedBehavior: 'The home page opens', reproductionSteps: ['Open login', 'Click login'], routing: { priority: 'high', capabilityHints: ['typescript', 'react'], quality: 'high' },
 });
 
@@ -12,6 +13,7 @@ describe('external task transaction', () => {
     const database = openDatabase(':memory:'); const repository = new SQLiteBugRepository(database);
     const first = repository.createExternalTask(request, 'external-key'); const second = repository.createExternalTask(request, 'external-key');
     expect(second.taskId).toBe(first.taskId); expect(second.jobId).toBe(first.jobId); expect(second.idempotent).toBe(true);
+    expect(repository.getBug(first.taskId)).toMatchObject({ dev_env_snapshot: request.dev_env_snapshot, dev_env_special: request.dev_env_special });
     expect(database.prepare('SELECT COUNT(*) AS count FROM bug_reports').get()).toEqual({ count: 1 });
     expect(database.prepare('SELECT COUNT(*) AS count FROM jobs').get()).toEqual({ count: 1 });
     expect(database.prepare('SELECT COUNT(*) AS count FROM task_repositories').get()).toEqual({ count: 1 });

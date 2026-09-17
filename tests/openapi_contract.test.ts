@@ -229,10 +229,10 @@ describe('external REST API OpenAPI contract', () => {
   it('documents strict bugfix/development input variants and their bounds', () => {
     const bugfix = schemas().ExternalBugfixTask;
     const development = schemas().ExternalDevelopmentTask;
-    expect(bugfix.required).toEqual(['taskType', 'title', 'executionTarget', 'repository', 'actualBehavior', 'expectedBehavior', 'reproductionSteps']);
-    expect(development.required).toEqual(['taskType', 'title', 'executionTarget', 'repository', 'objective', 'requirements', 'acceptanceCriteria']);
-    expect(Object.keys(bugfix.properties)).toEqual(expect.arrayContaining(['errorMessages', 'stackTraces', 'environment', 'routing']));
-    expect(Object.keys(development.properties)).toEqual(expect.arrayContaining(['constraints', 'nonGoals', 'routing']));
+    expect(bugfix.required).toEqual(['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'dev_env_special', 'actualBehavior', 'expectedBehavior', 'reproductionSteps']);
+    expect(development.required).toEqual(['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'dev_env_special', 'objective', 'requirements', 'acceptanceCriteria']);
+    expect(Object.keys(bugfix.properties)).toEqual(expect.arrayContaining(['dev_env_snapshot', 'dev_env_special', 'errorMessages', 'stackTraces', 'environment', 'routing']));
+    expect(Object.keys(development.properties)).toEqual(expect.arrayContaining(['dev_env_snapshot', 'dev_env_special', 'constraints', 'nonGoals', 'routing']));
     expect(bugfix.properties.reproductionSteps).toMatchObject({ minItems: 1, maxItems: 100 });
     expect(development.properties.requirements).toMatchObject({ minItems: 1, maxItems: 100 });
     expect(development.properties.constraints).toMatchObject({ maxItems: 100 });
@@ -285,6 +285,8 @@ describe('external REST API OpenAPI contract', () => {
       title: 'A login bug',
       executionTarget: 'frontend',
       repository: { cloneUrl: 'https://git.example.test/team/project.git' },
+      dev_env_snapshot: 'r35.1',
+      dev_env_special: 'raw-spofer-pel v2.0.200',
       actualBehavior: 'The button is inert',
       expectedBehavior: 'The button submits',
       reproductionSteps: ['Open the page'],
@@ -296,6 +298,8 @@ describe('external REST API OpenAPI contract', () => {
       title: 'Add export',
       executionTarget: 'backend',
       repository: { cloneUrl: 'git@git.example.test:team/project.git' },
+      dev_env_snapshot: 'r35.1',
+      dev_env_special: 'raw-spofer-pel v2.0.200',
       objective: 'Export rows',
       requirements: ['Keep current filters'],
       acceptanceCriteria: ['The CSV opens'],
@@ -311,12 +315,16 @@ describe('external REST API OpenAPI contract', () => {
       { name: 'bugfix reproduction item', payload: { ...bugfix, reproductionSteps: ['  '] }, valid: false },
       { name: 'bugfix error item', payload: { ...bugfix, errorMessages: ['\t'] }, valid: false },
       { name: 'bugfix stack item', payload: { ...bugfix, stackTraces: ['\n'] }, valid: false },
+      { name: 'bugfix dev_env_snapshot', payload: { ...bugfix, dev_env_snapshot: '  ' }, valid: false },
+      { name: 'bugfix dev_env_special', payload: { ...bugfix, dev_env_special: '\n\t' }, valid: false },
       { name: 'development title', payload: { ...development, title: '  ' }, valid: false },
       { name: 'development objective', payload: { ...development, objective: '\t\n' }, valid: false },
       { name: 'development requirement item', payload: { ...development, requirements: ['  '] }, valid: false },
       { name: 'development acceptance item', payload: { ...development, acceptanceCriteria: ['\n'] }, valid: false },
       { name: 'development constraint item', payload: { ...development, constraints: ['\t'] }, valid: false },
       { name: 'development non-goal item', payload: { ...development, nonGoals: ['  '] }, valid: false },
+      { name: 'development dev_env_snapshot', payload: { ...development, dev_env_snapshot: '  ' }, valid: false },
+      { name: 'development dev_env_special', payload: { ...development, dev_env_special: '\n\t' }, valid: false },
     ];
     for (const testCase of taskCases) {
       const zodValid = ExternalTaskCreateRequestSchema.safeParse(testCase.payload).success;
@@ -332,6 +340,8 @@ describe('external REST API OpenAPI contract', () => {
       title: 'Broken login',
       executionTarget: 'frontend',
       repository: { cloneUrl: 'https://git.example.test/team/project.git', baseBranch: 'main' },
+      dev_env_snapshot: 'r35.1',
+      dev_env_special: 'raw-spofer-pel v2.0.200',
       actualBehavior: 'Clicking login does nothing.',
       expectedBehavior: 'The user reaches the home page.',
       reproductionSteps: ['Open login', 'Click the button'],
@@ -359,6 +369,8 @@ describe('external REST API OpenAPI contract', () => {
       title: 'Add CSV export',
       executionTarget: 'backend',
       repository: { cloneUrl: 'git@git.example.test:team/project.git' },
+      dev_env_snapshot: 'r35.1',
+      dev_env_special: 'raw-spofer-pel v2.0.200',
       objective: 'Export filtered rows as CSV.',
       requirements: ['Preserve the current filters'],
       acceptanceCriteria: ['The downloaded file is valid CSV'],
