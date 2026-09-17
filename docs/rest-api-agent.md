@@ -1,7 +1,7 @@
 # LLM Bugfix REST API v1：Agent 接入文档
 
 本文面向调用 LLM Bugfix Gateway 的自动化 Agent。契约基于提交
-`b6a599eda204b3675a1d33b4131745d8e9aa2065`，用于提交异步 Bug 修复或开发任务、跟踪进度并读取结构化结果。
+`108d675aa61af4d9a1ec36aafe8074236209d4c7`，用于提交异步 Bug 修复或开发任务、跟踪进度并读取结构化结果。
 
 服务同时提供机器可读的 OpenAPI 3.1 契约：
 
@@ -69,7 +69,7 @@ Idempotency-Key: <1 至 200 字符的稳定键>
 | `title` | 是 | 非空字符串，最多 500 字符 | 简明任务标题 |
 | `executionTarget` | 是 | `frontend` \| `backend` | 执行目标 |
 | `dev_env_snapshot` | 是 | 非空字符串，最多 50000 字符 | 开发环境快照版本，例如 `r35.1` |
-| `dev_env_special` | 否 | 如果填写则为非空字符串，最多 50000 字符 | 可选的开发环境特殊组件及版本，例如 `raw-spofer-pel v2.0.200` |
+| `dev_env_special` | 否 | 如果填写则为 1 至 100 个非空字符串的数组；每项最多 50000 字符 | 可选的开发环境特殊 module 版本，例如 `["raw-spofer-pel v2.0.200", "another-module v1.2.3"]` |
 | `repository` | 是 | object | Git 仓库信息 |
 | `repository.cloneUrl` | 是 | 字符串，最多 2048 字符 | HTTP(S)、`ssh://` 或 scp 风格 SSH remote |
 | `repository.baseBranch` | 否 | 合法 Git 分支名，最多 255 字符 | 默认 `main` |
@@ -79,7 +79,7 @@ Idempotency-Key: <1 至 200 字符的稳定键>
 | `routing.quality` | 否 | `standard` \| `high` | 默认 `standard` |
 
 `dev_env_snapshot` 对 `bugfix`、`development` 两种任务类型都必填，`dev_env_special` 可填可不填。
-如果填写 `dev_env_special`，推荐按 `raw-spofer-pel v2.0.200` 这种组件及版本格式填写；当前接口校验非空和长度，不强制固定的版本号正则。
+如果填写 `dev_env_special`，数组中的每一项对应一个 module 的特殊版本，推荐按 `raw-spofer-pel v2.0.200` 这种组件及版本格式填写；当前接口校验数组数量、元素非空和长度，不强制固定的版本号正则。
 
 仓库约束：
 
@@ -109,7 +109,10 @@ Idempotency-Key: <1 至 200 字符的稳定键>
   "title": "修复登录按钮点击无响应",
   "executionTarget": "frontend",
   "dev_env_snapshot": "r35.1",
-  "dev_env_special": "raw-spofer-pel v2.0.200",
+  "dev_env_special": [
+    "raw-spofer-pel v2.0.200",
+    "another-module v1.2.3"
+  ],
   "repository": {
     "cloneUrl": "https://git.example.test/team/project.git",
     "baseBranch": "main"
@@ -155,7 +158,10 @@ Idempotency-Key: <1 至 200 字符的稳定键>
   "title": "增加 CSV 导出接口",
   "executionTarget": "backend",
   "dev_env_snapshot": "r35.1",
-  "dev_env_special": "raw-spofer-pel v2.0.200",
+  "dev_env_special": [
+    "raw-spofer-pel v2.0.200",
+    "another-module v1.2.3"
+  ],
   "repository": {
     "cloneUrl": "git@git.example.test:team/project.git"
   },
