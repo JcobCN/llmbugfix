@@ -104,7 +104,7 @@ const ExternalTaskBaseSchema = z.object({
   executionTarget: ExternalExecutionTargetSchema,
   repository: RepositoryTargetSchema,
   dev_env_snapshot: z.string().trim().min(1).max(50_000),
-  dev_env_special: z.string().trim().min(1).max(50_000).optional(),
+  dev_env_special: z.array(z.string().trim().min(1).max(50_000)).min(1).max(100).optional(),
   routing: RoutingRequirementsSchema.default({}),
 }).strict();
 

@@ -4,7 +4,7 @@ import { openDatabase, SQLiteBugRepository, IdempotencyConflictError } from './i
 
 const request = ExternalTaskCreateRequestSchema.parse({
   taskType: 'bugfix', title: 'Fix login', executionTarget: 'frontend', repository: { cloneUrl: 'https://git.example.test/team/project.git', baseBranch: 'main' },
-  dev_env_snapshot: 'r35.1', dev_env_special: 'raw-spofer-pel v2.0.200',
+  dev_env_snapshot: 'r35.1', dev_env_special: ['raw-spofer-pel v2.0.200', 'another-module v1.2.3'],
   actualBehavior: 'The button does nothing', expectedBehavior: 'The home page opens', reproductionSteps: ['Open login', 'Click login'], routing: { priority: 'high', capabilityHints: ['typescript', 'react'], quality: 'high' },
 });
 
@@ -19,6 +19,16 @@ describe('external task transaction', () => {
     expect(database.prepare('SELECT COUNT(*) AS count FROM task_repositories').get()).toEqual({ count: 1 });
     expect(database.prepare('SELECT COUNT(*) AS count FROM idempotency_keys').get()).toEqual({ count: 1 });
     expect(repository.listTaskEvents(first.taskId)).toHaveLength(2);
+    database.close();
+  });
+  it('normalizes legacy persisted special-version strings to arrays', () => {
+    const database = openDatabase(':memory:'); const repository = new SQLiteBugRepository(database);
+    const created = repository.createExternalTask(request, 'legacy-special-key');
+    const row = database.prepare('SELECT report FROM bug_reports WHERE id = ?').get(created.taskId) as { report: string };
+    const legacyReport = JSON.parse(row.report) as Record<string, unknown>;
+    legacyReport.dev_env_special = 'legacy-module v0.9.0';
+    database.prepare('UPDATE bug_reports SET report = ? WHERE id = ?').run(JSON.stringify(legacyReport), created.taskId);
+    expect(repository.getBug(created.taskId)?.dev_env_special).toEqual(['legacy-module v0.9.0']);
     database.close();
   });
   it('rejects reuse of a key with a different request body', () => {

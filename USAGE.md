@@ -94,7 +94,7 @@ curl -i -X POST http://127.0.0.1:8033/api/v1/tasks \
     "executionTarget":"frontend",
     "repository":{"cloneUrl":"https://git.example.test/team/project.git","baseBranch":"main"},
     "dev_env_snapshot":"r35.1",
-    "dev_env_special":"raw-spofer-pel v2.0.200",
+    "dev_env_special":["raw-spofer-pel v2.0.200","another-module v1.2.3"],
     "actualBehavior":"点击后无响应",
     "expectedBehavior":"进入首页",
     "reproductionSteps":["打开登录页","点击登录"],
@@ -102,7 +102,7 @@ curl -i -X POST http://127.0.0.1:8033/api/v1/tasks \
   }'
 ```
 
-`dev_env_snapshot` 必填；`dev_env_special` 可填可不填。如果填写，必须是非空字符串，推荐使用如 `raw-spofer-pel v2.0.200` 的组件及版本格式。
+`dev_env_snapshot` 必填；`dev_env_special` 可填可不填。如果填写，必须是包含 1 至 100 个非空字符串的数组，每项代表一个 module 的特殊版本，例如 `raw-spofer-pel v2.0.200`。
 
 成功响应为 `202 Accepted`，并带 `Location: /api/v1/tasks/{taskId}`。重复提交相同 key 和请求体会返回同一个任务并标记 `idempotent: true`；相同 key 配不同请求体返回 `409 IDEMPOTENCY_CONFLICT`。服务不会在 HTTP 请求期间执行 clone、LLM、验证或 push。
 
