@@ -102,6 +102,8 @@ curl -i -X POST http://127.0.0.1:8033/api/v1/tasks \
   }'
 ```
 
+`dev_env_snapshot` 必填；`dev_env_special` 可填可不填。如果填写，必须是非空字符串，推荐使用如 `raw-spofer-pel v2.0.200` 的组件及版本格式。
+
 成功响应为 `202 Accepted`，并带 `Location: /api/v1/tasks/{taskId}`。重复提交相同 key 和请求体会返回同一个任务并标记 `idempotent: true`；相同 key 配不同请求体返回 `409 IDEMPOTENCY_CONFLICT`。服务不会在 HTTP 请求期间执行 clone、LLM、验证或 push。
 
 常用查询：

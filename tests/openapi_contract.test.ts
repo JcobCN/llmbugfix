@@ -229,8 +229,8 @@ describe('external REST API OpenAPI contract', () => {
   it('documents strict bugfix/development input variants and their bounds', () => {
     const bugfix = schemas().ExternalBugfixTask;
     const development = schemas().ExternalDevelopmentTask;
-    expect(bugfix.required).toEqual(['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'dev_env_special', 'actualBehavior', 'expectedBehavior', 'reproductionSteps']);
-    expect(development.required).toEqual(['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'dev_env_special', 'objective', 'requirements', 'acceptanceCriteria']);
+    expect(bugfix.required).toEqual(['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'actualBehavior', 'expectedBehavior', 'reproductionSteps']);
+    expect(development.required).toEqual(['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'objective', 'requirements', 'acceptanceCriteria']);
     expect(Object.keys(bugfix.properties)).toEqual(expect.arrayContaining(['dev_env_snapshot', 'dev_env_special', 'errorMessages', 'stackTraces', 'environment', 'routing']));
     expect(Object.keys(development.properties)).toEqual(expect.arrayContaining(['dev_env_snapshot', 'dev_env_special', 'constraints', 'nonGoals', 'routing']));
     expect(bugfix.properties.reproductionSteps).toMatchObject({ minItems: 1, maxItems: 100 });
@@ -309,6 +309,8 @@ describe('external REST API OpenAPI contract', () => {
     const taskCases: Array<{ name: string; payload: Record<string, unknown>; valid: boolean }> = [
       { name: 'bugfix baseline', payload: bugfix, valid: true },
       { name: 'development baseline', payload: development, valid: true },
+      { name: 'bugfix without optional dev_env_special', payload: Object.fromEntries(Object.entries(bugfix).filter(([key]) => key !== 'dev_env_special')), valid: true },
+      { name: 'development without optional dev_env_special', payload: Object.fromEntries(Object.entries(development).filter(([key]) => key !== 'dev_env_special')), valid: true },
       { name: 'bugfix title', payload: { ...bugfix, title: ' \t ' }, valid: false },
       { name: 'bugfix actualBehavior', payload: { ...bugfix, actualBehavior: '  ' }, valid: false },
       { name: 'bugfix expectedBehavior', payload: { ...bugfix, expectedBehavior: '\n\t' }, valid: false },

@@ -43,7 +43,7 @@ describe('external REST API v1 routes', () => {
 
     const accepted = await routes().handle(request('POST', '/api/v1/tasks', {
       taskType: 'bugfix', title: 'Broken login', executionTarget: 'frontend', repository: { cloneUrl: 'https://git.example.test/team/project.git' },
-      dev_env_snapshot: 'r35.1', dev_env_special: 'raw-spofer-pel v2.0.200',
+      dev_env_snapshot: 'r35.1',
       actualBehavior: 'No response', expectedBehavior: 'Go home', reproductionSteps: ['Click login'],
     }, { 'Idempotency-Key': 'create-1' }));
     expect(accepted?.status).toBe(202);

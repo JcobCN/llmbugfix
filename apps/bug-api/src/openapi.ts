@@ -238,7 +238,7 @@ export const OPENAPI_DOCUMENT = {
       ExternalBugfixTask: {
         type: 'object',
         additionalProperties: false,
-        required: ['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'dev_env_special', 'actualBehavior', 'expectedBehavior', 'reproductionSteps'],
+        required: ['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'actualBehavior', 'expectedBehavior', 'reproductionSteps'],
         properties: {
           taskType: { const: 'bugfix' },
           // zod trims this field before applying min/max; `\\S` keeps
@@ -277,7 +277,7 @@ export const OPENAPI_DOCUMENT = {
       ExternalDevelopmentTask: {
         type: 'object',
         additionalProperties: false,
-        required: ['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'dev_env_special', 'objective', 'requirements', 'acceptanceCriteria'],
+        required: ['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'objective', 'requirements', 'acceptanceCriteria'],
         properties: {
           taskType: { const: 'development' },
           title: { type: 'string', minLength: 1, maxLength: 500, pattern: '\\S' },
