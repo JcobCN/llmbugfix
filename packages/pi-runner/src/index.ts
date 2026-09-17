@@ -4,8 +4,10 @@ import { newId } from '@llmbugfix/shared';
 import {
   AgentFixResultSchema,
   AgentTaskResultSchema,
+  BugReviewResultSchema,
   BugFixTaskSchema,
   CodingTaskSchema,
+  DevelopmentReviewResultSchema,
   ReviewResultSchema,
   type BugFixTask,
   type CodingTask,
@@ -39,6 +41,8 @@ import { z } from 'zod';
 const StrictFixResultSchema = AgentFixResultSchema.strict();
 const StrictTaskResultSchema = AgentTaskResultSchema;
 const StrictReviewResultSchema = ReviewResultSchema.strict();
+const StrictBugReviewResultSchema = BugReviewResultSchema.strict();
+const StrictDevelopmentReviewResultSchema = DevelopmentReviewResultSchema.strict();
 export type AgentFixResultChecked = z.infer<typeof StrictFixResultSchema>;
 export type AgentTaskResultChecked = z.infer<typeof StrictTaskResultSchema>;
 export type ReviewResultChecked = z.infer<typeof StrictReviewResultSchema>;
@@ -431,6 +435,66 @@ export function createSubmitFixResultTool(options: SubmitFixResultToolOptions): 
   });
 }
 
+export type SubmitReviewResultToolOptions = {
+  taskType: 'bugfix' | 'development';
+  logger?: PiRunnerLogger;
+  onSubmit: (result: ReviewResultChecked) => void;
+  result?: ReviewResultChecked;
+};
+
+/**
+ * Give reviewers the same typed completion channel as fixers. The tool
+ * schema is task-specific so a bugfix cannot omit bugAddressed and a
+ * development task cannot omit its acceptance-criteria evidence.
+ */
+export function createSubmitReviewResultTool(options: SubmitReviewResultToolOptions): ToolDefinition {
+  const stringArray = { type: 'array', items: { type: 'string' } };
+  const acceptanceCriteria = {
+    type: 'array', items: {
+      type: 'object', additionalProperties: false,
+      properties: { criterion: { type: 'string' }, met: { type: 'boolean' }, evidence: { type: 'string' } },
+      required: ['criterion', 'met', 'evidence'],
+    },
+  };
+  const properties: Record<string, unknown> = {
+    verdict: { type: 'string', enum: ['approve', 'reject'] },
+    regressionRisk: { type: 'string', enum: ['low', 'medium', 'high'] },
+    summary: { type: 'string' }, findings: stringArray,
+  };
+  const required = options.taskType === 'development'
+    ? ['verdict', 'taskAddressed', 'acceptanceCriteriaMet', 'regressionRisk', 'summary', 'findings']
+    : ['verdict', 'bugAddressed', 'regressionRisk', 'summary', 'findings'];
+  if (options.taskType === 'development') {
+    properties.taskAddressed = { type: 'boolean' };
+    properties.acceptanceCriteriaMet = acceptanceCriteria;
+  } else {
+    properties.bugAddressed = { type: 'boolean' };
+  }
+  const parameters = { type: 'object', additionalProperties: false, properties, required } as unknown as ToolDefinition['parameters'];
+  const schema = options.taskType === 'development' ? StrictDevelopmentReviewResultSchema : StrictBugReviewResultSchema;
+  return defineTool({
+    name: 'submit_review_result', label: 'Submit review result',
+    description: 'Submit the completed read-only review to the host. Call exactly once after inspecting the supplied evidence.',
+    promptSnippet: 'submit_review_result — submit the structured reviewer result',
+    promptGuidelines: ['This is the authoritative completion channel. Call it exactly once when the review is complete.', 'Pass every field with its declared type: booleans must be JSON booleans and findings must be an array of strings.'],
+    parameters,
+    execute: async (_toolCallId, params) => {
+      let result: ReviewResultChecked;
+      try { result = schema.parse(params) as ReviewResultChecked; }
+      catch (error) {
+        const detail = error instanceof z.ZodError ? error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') : String(error);
+        throw new Error(`submit_review_result rejected: ${detail}`);
+      }
+      if (options.result) throw new Error('submit_review_result may only be called once');
+      options.onSubmit(result); options.result = result;
+      options.logger?.info({ role: 'reviewer' }, 'review contract accepted');
+      return { content: [{ type: 'text', text: 'Review result accepted by host.' }], details: { accepted: true }, terminate: true };
+    },
+  });
+}
+
+type CompletionToolOptions = SubmitFixResultToolOptions | SubmitReviewResultToolOptions;
+
 function fixerPrompt(input: FixerInput, safety: string): string {
   return [
     'Fix the reported bug in the current repository. You own the coding loop: inspect, reproduce when useful, edit files, and run appropriate validation.',
@@ -456,10 +520,22 @@ function coderPrompt(input: Omit<FixerInput, 'task'> & { task: CodingTask }, saf
 
 function reviewerPrompt(input: ReviewerInput): string {
   const development = 'taskType' in input.task && input.task.taskType === 'development';
+  const contract = development
+    ? [
+      'For a development task, required fields and types are: verdict ("approve"|"reject"), taskAddressed (boolean), acceptanceCriteriaMet (array of objects with criterion (string), met (boolean), evidence (string)), regressionRisk ("low"|"medium"|"high"), summary (string), and findings (array of strings).',
+      'Valid shape example:',
+      asJson({ verdict: 'approve', taskAddressed: true, acceptanceCriteriaMet: [{ criterion: 'The requested behavior works', met: true, evidence: 'The diff and supplied validation evidence cover this criterion.' }], regressionRisk: 'low', summary: 'The change satisfies the requested behavior.', findings: ['The change is limited to the requested scope.'] }),
+    ].join('\n')
+    : [
+      'For a bugfix, required fields and types are: verdict ("approve"|"reject"), bugAddressed (boolean), regressionRisk ("low"|"medium"|"high"), summary (string), and findings (array of strings).',
+      'Valid shape example:',
+      asJson({ verdict: 'approve', bugAddressed: true, regressionRisk: 'low', summary: 'The fix addresses the reported behavior.', findings: ['The changed calculation matches the expected result.'] }),
+    ].join('\n');
   return [
     development ? 'Review the proposed development change against every requirement, acceptance criterion, non-goal, repository convention, and regression risk. You are read-only: inspect files and supplied evidence, but do not modify files or run commands.' : 'Review the proposed bug fix in the current repository. You are read-only: inspect files and the supplied evidence, but do not modify files or run commands.',
-    'When finished, reply with exactly one JSON object (a single fenced ```json block is also accepted) and no surrounding prose.',
-    development ? 'The JSON must contain: verdict (approve|reject), taskAddressed, acceptanceCriteriaMet (array of {criterion, met, evidence}), regressionRisk (low|medium|high), summary, findings.' : 'The JSON must contain: verdict (approve|reject), bugAddressed, regressionRisk (low|medium|high), summary, findings.',
+    'When finished, call submit_review_result exactly once. Its accepted parameters are the authoritative completion result. If the tool is unavailable, reply with exactly one JSON object (a single fenced ```json block is also accepted) and no surrounding prose.',
+    contract,
+    'Hard type rules: bugAddressed and taskAddressed are JSON booleans, never explanatory strings. findings is always an array of strings, never an array of objects. Put explanations in summary or findings. Do not add fields that are not shown in the valid shape.',
     `Review evidence:\n${asJson({ task: input.task, profile: input.profile, diff: input.diff, filesChanged: input.filesChanged, validation: input.validation })}`,
   ].join('\n\n');
 }
@@ -616,16 +692,18 @@ export class PiAgentRunner implements AgentRunner {
     return this.runtimePromise;
   }
 
-  private async runRole<T>(role: 'fixer' | 'reviewer', cwd: string, prompt: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, signal?: AbortSignal, completion?: SubmitFixResultToolOptions, progress?: PiProgressSink): Promise<T> {
+  private async runRole<T>(role: 'fixer' | 'reviewer', cwd: string, prompt: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, signal?: AbortSignal, completion?: CompletionToolOptions, progress?: PiProgressSink): Promise<T> {
     if (role === 'fixer' && this.requireSandbox && !this.sandboxProfile) throw new Error('Pi fixer is disabled: PI_SANDBOX_PROFILE must name an externally enforced sandbox');
     if (signal?.aborted) throw new Error('Pi session cancelled');
     const runtime = await this.getRuntime();
     const model = runtime.getModel(this.providerId, this.modelName);
     if (!model) throw new Error(`Pi model is unavailable: ${this.providerId}/${this.modelName}`);
-    const customTools = role === 'fixer' ? this.fixerConfinedTools(cwd, completion) : [];
+    const customTools: ToolDefinition[] = role === 'fixer'
+      ? this.fixerConfinedTools(cwd, completion as SubmitFixResultToolOptions | undefined)
+      : completion ? [createSubmitReviewResultTool(completion as SubmitReviewResultToolOptions)] : [];
     // `createAgentSession({ tools })` doubles as Pi's allowed-tool allowlist;
     // include the SDK completion tool there or Pi would register but hide it.
-    const tools = role === 'fixer' ? [...FIXER_TOOLS, ...(completion ? ['submit_fix_result'] as const : [])] : REVIEWER_TOOLS;
+    const tools = role === 'fixer' ? [...FIXER_TOOLS, ...(completion ? ['submit_fix_result'] as const : [])] : [...REVIEWER_TOOLS, ...(completion ? ['submit_review_result'] as const : [])];
     const sessionResult = await this.sessionFactory({
       cwd,
       model,
@@ -660,7 +738,8 @@ export class PiAgentRunner implements AgentRunner {
     const maxToolCalls = role === 'fixer' ? this.fixerMaxToolCalls : this.reviewerMaxToolCalls;
     const maxRepeatedToolCalls = role === 'fixer' ? this.fixerMaxRepeatedToolCalls : this.reviewerMaxRepeatedToolCalls;
     const closeoutGraceMs = role === 'fixer' ? this.fixerCloseoutGraceMs : this.reviewerCloseoutGraceMs;
-    const closeoutText = 'Stop inspecting and editing now. Submit the structured result with submit_fix_result (fixer) or the exact JSON fallback immediately. Do not start another tool call.';
+    const completionName = role === 'fixer' ? 'submit_fix_result' : 'submit_review_result';
+    const closeoutText = `Stop inspecting and editing now. Submit the structured result with ${completionName} or the exact JSON fallback immediately. Do not start another tool call.`;
     const emitProgress = (event: PiProgressEvent): void => {
       if (!progress) return;
       try { void Promise.resolve(progress(event)).catch((error) => this.logger?.error({ role, error: error instanceof Error ? error.message : String(error) }, 'pi progress sink failed')); }
@@ -782,12 +861,19 @@ export class PiAgentRunner implements AgentRunner {
             lastValidationError = error instanceof z.ZodError ? error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('\n') : error instanceof Error ? error.message : String(error);
             this.logger?.error({ role, attempt: attempt + 1, validationError: lastValidationError, outputBytes: output.length }, `pi ${role} output failed validation`);
             if (attempt === 0) {
+              const correctionContract = role === 'reviewer'
+                ? [
+                  'Reviewer contract reminder: bugfix results require bugAddressed as a literal JSON boolean; development results require taskAddressed as a literal JSON boolean and acceptanceCriteriaMet as an array of {criterion: string, met: boolean, evidence: string}.',
+                  'findings must be an array whose every item is a string. Put explanations in summary or findings; do not use explanatory strings for boolean fields and do not use objects as findings.',
+                ].join('\n')
+                : '';
               await session.prompt([
                 `Your previous response failed output validation:\n${lastValidationError}`,
                 'Reply again with exactly one JSON object (a single fenced ```json block is also accepted) matching the required schema and no surrounding prose.',
                 'Every required field must be present with the correct type. Array fields must always be JSON arrays: wrap prose values like ["note"] instead of "note", and use [] when empty.',
+                correctionContract,
                 'Do not invent facts to satisfy validation.',
-              ].join('\n'), { expandPromptTemplates: false, source: 'rpc' });
+              ].filter(Boolean).join('\n'), { expandPromptTemplates: false, source: 'rpc' });
             }
           }
         }
@@ -843,7 +929,12 @@ export class PiAgentRunner implements AgentRunner {
     const task = 'taskType' in input.task ? CodingTaskSchema.parse(input.task) : BugFixTaskSchema.parse(input.task);
     const profile = EnvironmentProfileSchema.parse(input.profile);
     const validation = DeterministicValidationSchema.parse(input.validation);
-    return this.runRole('reviewer', input.worktreePath, reviewerPrompt({ ...input, task, profile, validation }), StrictReviewResultSchema, input.signal, undefined, input.progress);
+    if ('taskType' in task && task.taskType === 'development') {
+      const completion: SubmitReviewResultToolOptions = { taskType: 'development', logger: this.logger, onSubmit: () => undefined };
+      return this.runRole('reviewer', input.worktreePath, reviewerPrompt({ ...input, task, profile, validation }), StrictDevelopmentReviewResultSchema, input.signal, completion, input.progress);
+    }
+    const completion: SubmitReviewResultToolOptions = { taskType: 'bugfix', logger: this.logger, onSubmit: () => undefined };
+    return this.runRole('reviewer', input.worktreePath, reviewerPrompt({ ...input, task, profile, validation }), StrictBugReviewResultSchema, input.signal, completion, input.progress);
   }
 }
 
@@ -879,7 +970,20 @@ export class FakePiRunner implements AgentRunner {
     const sessionId = newId();
     this.reviewerSessions.push(sessionId);
     this.reviewerBackendIds.push(input.backendId ?? this.backendId ?? 'fake');
-    const result = StrictReviewResultSchema.parse(this.reviewResult ?? { verdict: input.validation.passed ? 'approve' : 'reject', bugAddressed: input.validation.passed, regressionRisk: 'low', summary: 'Fake review result', findings: [] });
+    let result: ReviewResultChecked;
+    if ('taskType' in input.task && input.task.taskType === 'development') {
+      result = StrictDevelopmentReviewResultSchema.parse(this.reviewResult ?? {
+        verdict: input.validation.passed ? 'approve' : 'reject',
+        taskAddressed: input.validation.passed,
+        acceptanceCriteriaMet: input.task.acceptanceCriteria.map((criterion) => ({ criterion, met: input.validation.passed, evidence: 'Fake validation evidence' })),
+        regressionRisk: 'low', summary: 'Fake review result', findings: [],
+      }) as ReviewResultChecked;
+    } else {
+      result = StrictBugReviewResultSchema.parse(this.reviewResult ?? {
+        verdict: input.validation.passed ? 'approve' : 'reject', bugAddressed: input.validation.passed,
+        regressionRisk: 'low', summary: 'Fake review result', findings: [],
+      }) as ReviewResultChecked;
+    }
     await input.progress?.({ role: 'reviewer', eventType: 'completed', summary: 'reviewer completed' });
     return result;
   }

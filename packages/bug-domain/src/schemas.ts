@@ -156,8 +156,17 @@ export type FixCandidateMetadata = z.infer<typeof FixCandidateMetadataSchema>;
 
 export const ValidationResultSchema = z.object({ passed: z.boolean(), commands: z.array(z.string()), results: z.array(z.object({ command: z.string(), exitCode: z.number().int(), passed: z.boolean(), output: z.string() })), summary: z.string().default(''), artifacts: z.array(z.string()).default([]) });
 export type ValidationResult = z.infer<typeof ValidationResultSchema>;
-export const ReviewResultSchema = z.object({ verdict: z.enum(['approve', 'reject']), bugAddressed: z.boolean().optional(), taskAddressed: z.boolean().optional(), acceptanceCriteriaMet: z.array(z.object({ criterion: z.string(), met: z.boolean(), evidence: z.string() })).optional(), regressionRisk: z.enum(['low', 'medium', 'high']), summary: z.string(), findings: z.array(z.string()).default([]) });
+const ReviewAcceptanceCriterionSchema = z.object({ criterion: z.string(), met: z.boolean(), evidence: z.string() });
+const ReviewResultBaseSchema = z.object({ verdict: z.enum(['approve', 'reject']), regressionRisk: z.enum(['low', 'medium', 'high']), summary: z.string(), findings: z.array(z.string()) });
+export const ReviewResultSchema = ReviewResultBaseSchema.extend({ bugAddressed: z.boolean().optional(), taskAddressed: z.boolean().optional(), acceptanceCriteriaMet: z.array(ReviewAcceptanceCriterionSchema).optional() });
 export type ReviewResult = z.infer<typeof ReviewResultSchema>;
+/** Task-specific review contracts make fields required at the boundary where
+ * the orchestrator consumes them. The generic schema remains available for
+ * compatibility with callers that handle both task types. */
+export const BugReviewResultSchema = ReviewResultBaseSchema.extend({ bugAddressed: z.boolean() }).strict();
+export const DevelopmentReviewResultSchema = ReviewResultBaseSchema.extend({ taskAddressed: z.boolean(), acceptanceCriteriaMet: z.array(ReviewAcceptanceCriterionSchema) }).strict();
+export type BugReviewResult = z.infer<typeof BugReviewResultSchema>;
+export type DevelopmentReviewResult = z.infer<typeof DevelopmentReviewResultSchema>;
 export const GitResultSchema = z.object({ success: z.boolean(), branch: nullableString, commitSha: nullableString, mergeRequestUrl: nullableString, pushed: z.boolean(), error: nullableString });
 export type GitResult = z.infer<typeof GitResultSchema>;
 
@@ -182,6 +191,8 @@ export const agentTaskResultSchema = AgentTaskResultSchema;
 export const fixCandidateMetadataSchema = FixCandidateMetadataSchema;
 export const validationResultSchema = ValidationResultSchema;
 export const reviewResultSchema = ReviewResultSchema;
+export const bugReviewResultSchema = BugReviewResultSchema;
+export const developmentReviewResultSchema = DevelopmentReviewResultSchema;
 export const gitResultSchema = GitResultSchema;
 export const MessageSchema = ConversationMessageSchema;
 export type Message = ConversationMessage;

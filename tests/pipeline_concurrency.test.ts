@@ -252,6 +252,31 @@ describe('Orchestrator concurrency', () => {
     expect(h.statuses).toContain('FIX_READY');
   });
 
+  it('retries a reviewer contract failure on another backend without rerunning fixer or validation', async () => {
+    const fixerCalls: string[] = [];
+    const reviewerCalls: string[] = [];
+    const h = harness({
+      backendIds: ['backend-a', 'backend-b', 'backend-c'],
+      fixer: async (backendId, input, mutations) => {
+        fixerCalls.push(backendId);
+        mutations.set(input.worktreePath, 'fix');
+        return { bugKey: 'BUG-000011', status: 'fixed', confidence: 1, summary: 'fixed', rootCause: null, reproduced: true, regressionTestAdded: false, filesChanged: [], riskNotes: [], blockedReason: null, missingInformation: [] };
+      },
+      reviewer: async (backendId) => {
+        reviewerCalls.push(backendId);
+        if (backendId === 'backend-b') throw new PiAgentOutputFormatError('reviewer', '{"bugAddressed":"Yes"}', 'bugAddressed: Expected boolean');
+        return { verdict: 'approve', bugAddressed: true, regressionRisk: 'low', summary: 'approved', findings: [] };
+      },
+    });
+    await h.orchestrator.tick();
+    expect(fixerCalls).toEqual(['backend-a']);
+    expect(reviewerCalls).toEqual(['backend-b', 'backend-c']);
+    expect(h.counters.validation).toBe(1);
+    expect(h.statuses).toContain('FIX_READY');
+    expect(h.agentRuns.filter((run) => run.agentType === 'reviewer')).toHaveLength(2);
+    expect(h.agentRuns.filter((run) => run.agentType === 'reviewer').map((run) => run.status)).toEqual(['FAILED', 'COMPLETED']);
+  });
+
   it('does not fail over a reviewer rejection', async () => {
     const reviewerCalls: string[] = [];
     const h = harness({

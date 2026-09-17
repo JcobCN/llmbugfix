@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createSubmitFixResultTool, FakePiRunner, PiAgentRunner, PiAgentOutputFormatError, PiAgentLoopBudgetError, PiAgentRunnerTimeoutError, parseAgentJson, type PiSession, type PiSessionFactoryOptions } from './index.js';
+import { createSubmitFixResultTool, createSubmitReviewResultTool, FakePiRunner, PiAgentRunner, PiAgentOutputFormatError, PiAgentLoopBudgetError, PiAgentRunnerTimeoutError, parseAgentJson, type PiSession, type PiSessionFactoryOptions } from './index.js';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { BugFixTask, CodingTask } from '@llmbugfix/bug-domain';
 import type { EnvironmentProfile } from '@llmbugfix/environment-resolver';
@@ -33,6 +33,14 @@ const fixResult = {
 const reviewResult = {
   verdict: 'approve' as const,
   bugAddressed: true,
+  regressionRisk: 'low' as const,
+  summary: 'looks good',
+  findings: [],
+};
+const developmentReviewResult = {
+  verdict: 'approve' as const,
+  taskAddressed: true,
+  acceptanceCriteriaMet: [{ criterion: 'A CSV downloads', met: true, evidence: 'The supplied validation evidence covers the criterion.' }],
   regressionRisk: 'low' as const,
   summary: 'looks good',
   findings: [],
@@ -85,7 +93,7 @@ describe('PiAgentRunner', () => {
     }));
     expect(sessionOptions.map((options) => [...options.tools])).toEqual([
       ['read', 'grep', 'find', 'ls', 'edit', 'write', 'bash', 'submit_fix_result'],
-      ['read', 'grep', 'find', 'ls'],
+      ['read', 'grep', 'find', 'ls', 'submit_review_result'],
     ]);
     expect(sessionOptions[0].cwd).toBe('/tmp/worktree');
     expect(sessionOptions[0].sessionManager).not.toBe(sessionOptions[1].sessionManager);
@@ -213,6 +221,50 @@ describe('PiAgentRunner', () => {
     const repaired = { ...fixResult, riskNotes: 'a long note', missingInformation: '' };
     const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, sessionFactory: async () => ({ session: sessionReturning(JSON.stringify(repaired)) }) });
     await expect(runner.runFixer({ worktreePath: '/tmp/worktree', task, profile, safety: 'safe' })).resolves.toMatchObject({ riskNotes: ['a long note'], missingInformation: [] });
+  });
+
+  it('accepts a typed submit_review_result for bugfixes and rejects semantic wire types', async () => {
+    const accepted: unknown[] = [];
+    const tool = createSubmitReviewResultTool({ taskType: 'bugfix', onSubmit: (result) => accepted.push(result) });
+    await tool.execute('review', reviewResult, undefined, undefined, {} as never);
+    expect(accepted).toEqual([reviewResult]);
+    await expect(tool.execute('duplicate', reviewResult, undefined, undefined, {} as never)).rejects.toThrow(/only be called once/);
+
+    for (const invalid of [
+      { ...reviewResult, bugAddressed: 'Yes' },
+      { ...reviewResult, findings: [{ detail: 'not a string' }] },
+    ]) {
+      const invalidTool = createSubmitReviewResultTool({ taskType: 'bugfix', onSubmit: () => undefined });
+      await expect(invalidTool.execute('invalid', invalid, undefined, undefined, {} as never)).rejects.toThrow(/submit_review_result rejected/);
+    }
+  });
+
+  it('requires development-specific reviewer fields in submit_review_result', async () => {
+    const accepted: unknown[] = [];
+    const tool = createSubmitReviewResultTool({ taskType: 'development', onSubmit: (result) => accepted.push(result) });
+    await tool.execute('review', developmentReviewResult, undefined, undefined, {} as never);
+    expect(accepted).toEqual([developmentReviewResult]);
+    await expect(tool.execute('invalid', { ...developmentReviewResult, acceptanceCriteriaMet: [{ criterion: 'A CSV downloads', met: true }] }, undefined, undefined, {} as never)).rejects.toThrow(/submit_review_result rejected/);
+  });
+
+  it('rejects reviewer fields belonging to the other task type', async () => {
+    const bugTool = createSubmitReviewResultTool({ taskType: 'bugfix', onSubmit: () => undefined });
+    await expect(bugTool.execute('invalid', { ...reviewResult, taskAddressed: true }, undefined, undefined, {} as never)).rejects.toThrow(/submit_review_result rejected/);
+    const developmentTool = createSubmitReviewResultTool({ taskType: 'development', onSubmit: () => undefined });
+    await expect(developmentTool.execute('invalid', { ...developmentReviewResult, bugAddressed: true }, undefined, undefined, {} as never)).rejects.toThrow(/submit_review_result rejected/);
+  });
+
+  it('accepts an authoritative submit_review_result followed by ordinary prose', async () => {
+    const runtime = { registerProvider: vi.fn(), getModel: vi.fn(() => ({ id: 'test-model' })) };
+    let submit: ToolDefinition | undefined;
+    const session = {
+      prompt: vi.fn(async () => { await submit?.execute('review-1', reviewResult, undefined, undefined, {} as never); }),
+      getLastAssistantText: vi.fn(() => '审核完成，以上工具提交为准。'),
+      abort: vi.fn(async () => undefined), dispose: vi.fn(),
+    } as unknown as PiSession;
+    const runner = new PiAgentRunner({ endpoint: 'http://llm.test/v1', model: 'test-model', modelRuntime: runtime, sessionFactory: async (options) => { submit = options.customTools?.find((tool) => tool.name === 'submit_review_result'); return { session }; } });
+    await expect(runner.runReviewer({ worktreePath: '/tmp/worktree', task, profile, diff: 'diff', filesChanged: ['src/example.ts'], validation: { passed: true, commands: [], results: [], summary: '', artifacts: [] } })).resolves.toEqual(reviewResult);
+    expect(session.prompt).toHaveBeenCalledTimes(1);
   });
 
   it('requests one closeout and aborts when a loop repeats the same tool', async () => {
