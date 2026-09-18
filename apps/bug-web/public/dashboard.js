@@ -1,4 +1,5 @@
-(() => {
+(() =>
+{
   const $ = (x) => document.getElementById(x);
   const esc = (x) => String(x ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -14,12 +15,14 @@
   const isRunning = (bug) => String(jobFor(bug)?.status || '').toUpperCase() === 'RUNNING';
   const statusClass = (value) => String(value || 'NONE').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
 
-  function eventState(id) {
+  function eventState (id)
+{
     if (!logState.has(id)) logState.set(id, { events: [], after: 0, first: 0, hasMore: false, loading: false, autoScroll: true });
     return logState.get(id);
   }
 
-  function rowMarkup(bug) {
+  function rowMarkup (bug)
+{
     const id = bugId(bug);
     const job = jobFor(bug);
     const jobStatus = job?.status || bug.jobStatus || '—';
@@ -40,21 +43,24 @@
     <tr class="log-row" data-log-row="${esc(id)}"${opened ? '' : ' hidden'}><td colspan="8"><section id="worker-log-${esc(id)}" class="worker-log-panel" aria-label="Worker log for ${esc(bug.key || bug.bugKey)}">${logMarkup(id)}</section></td></tr>`;
   }
 
-  function logMarkup(id) {
+  function logMarkup (id)
+{
     const state = eventState(id);
     const controls = `<div class="worker-log-toolbar"><strong>Worker log</strong><label><input type="checkbox" class="auto-scroll" data-log-id="${esc(id)}"${state.autoScroll ? ' checked' : ''}> Auto-scroll</label>${state.hasMore ? `<button type="button" class="load-earlier" data-log-id="${esc(id)}">Load earlier</button>` : ''}</div>`;
     if (state.error && !state.events.length) return `${controls}<p class="log-empty">${esc(state.error)}</p>`;
     if (!state.events.length && !state.loading) return `${controls}<p class="log-empty">No Worker logs yet.</p>`;
-    const body = state.events.map((event) => {
+    const body = state.events.map((event) =>
+{
       const tool = event.tool ? `<span class="log-tool">${esc(event.tool)}</span>` : '';
       const error = event.isError ? ' log-error' : '';
-      const counter = event.turnIndex == null ? '' : ` · turn ${esc(event.turnIndex)}`;
+      const counter = event.turnIndex === null || event.turnIndex === undefined ? '' : ` · turn ${esc(event.turnIndex)}`;
       return `<li class="worker-event${error}"><time>${esc(event.occurredAt)}</time><span class="log-role">${esc(event.role)}</span><span class="log-type">${esc(event.eventType)}</span>${tool}<span class="log-summary">${esc(event.summary)}</span><small>${counter}</small></li>`;
     }).join('');
     return `${controls}<div class="worker-log-scroll" data-log-scroll="${esc(id)}"><ol>${body}</ol>${state.loading ? '<p class="log-loading">Loading…</p>' : ''}</div>`;
   }
 
-  function renderLog(id, keepScroll = true) {
+  function renderLog (id, keepScroll = true)
+{
     const row = [...document.querySelectorAll('[data-log-row]')].find((item) => item.dataset.logRow === id);
     const panel = row?.querySelector('.worker-log-panel');
     if (!panel) return;
@@ -67,24 +73,32 @@
     else if (next && !eventState(id).autoScroll) next.scrollTop = previousTop;
   }
 
-  function renderRows() {
+  function renderRows ()
+{
     const rows = $('rows');
     rows.querySelectorAll('[data-log-scroll]').forEach((element) => scrollPositions.set(element.dataset.logScroll, element.scrollTop));
     rows.innerHTML = [...bugsById.values()].map(rowMarkup).join('');
     $('table').hidden = bugsById.size === 0;
-    for (const id of expanded) {
-      renderLog(id, true);
+    for (const id of expanded)
+{
+      const state = eventState(id);
+      // Rebuilding the rows creates a fresh scroll container at scrollTop 0.
+      // Auto-scroll must use the new container's bottom, rather than letting
+      // renderLog infer the position from that fresh container.
+      renderLog(id, !state.autoScroll);
       const scroll = rows.querySelector(`[data-log-scroll="${id}"]`);
-      if (scroll && !eventState(id).autoScroll && scrollPositions.has(id)) scroll.scrollTop = scrollPositions.get(id);
+      if (scroll && !state.autoScroll && scrollPositions.has(id)) scroll.scrollTop = scrollPositions.get(id);
     }
   }
 
-  async function fetchEvents(id, mode = 'initial') {
+  async function fetchEvents (id, mode = 'initial')
+{
     const state = eventState(id);
     if (state.loading) return;
     state.loading = true;
     renderLog(id);
-    try {
+    try
+{
       const params = new URLSearchParams({ limit: '100' });
       if (mode === 'poll') params.set('after', String(state.after));
       // A very large before cursor asks the API for the newest bounded page;
@@ -98,29 +112,38 @@
       const bySequence = new Map(state.events.map((event) => [event.sequence, event]));
       incoming.forEach((event) => bySequence.set(event.sequence, event));
       state.events = [...bySequence.values()].sort((a, b) => Number(a.sequence) - Number(b.sequence)).slice(-1000);
-      if (incoming.length) {
+      if (incoming.length)
+{
         state.after = Math.max(state.after, Number(data.nextAfter ?? incoming[incoming.length - 1].sequence) || 0);
         if (mode !== 'poll') state.first = Number(data.firstSequence ?? incoming[0].sequence) || state.first;
       }
       state.hasMore = mode === 'poll' ? state.hasMore || Boolean(data.hasMore) : Boolean(data.hasMore);
       delete state.error;
-    } catch (error) {
+    }
+ catch (error)
+{
       state.error = error.message || 'Unable to load worker logs';
-    } finally {
+    }
+ finally
+{
       state.loading = false;
       renderLog(id, false);
     }
   }
 
-  async function load({ initial = false } = {}) {
+  async function load ({ initial = false } = {})
+{
     const state = $('state');
-    if (initial) {
+    if (initial)
+{
       state.className = 'loading';
       state.textContent = 'Loading bugs…';
     }
-    try {
+    try
+{
       const p = new URLSearchParams();
-      [['q', 'q'], ['target', 'target'], ['status', 'status']].forEach(([a, b]) => {
+      [['q', 'q'], ['target', 'target'], ['status', 'status']].forEach(([a, b]) =>
+{
         const value = $(b).value.trim();
         if (value) p.set(a, value);
       });
@@ -129,7 +152,8 @@
       if (!response.ok) throw Error(data.error || 'Unable to load bugs');
       bugsById = new Map((data.bugs || []).map((bug) => [bugId(bug), bug]));
       for (const id of [...expanded]) if (!bugsById.has(id)) expanded.delete(id);
-      if (!bugsById.size) {
+      if (!bugsById.size)
+{
         $('table').hidden = true;
         state.className = 'empty';
         state.textContent = 'No bugs match these filters.';
@@ -139,18 +163,25 @@
       state.textContent = '';
       renderRows();
       firstLoad = false;
-    } catch (error) {
-      if (firstLoad) {
+    }
+ catch (error)
+{
+      if (firstLoad)
+{
         state.className = 'error';
         state.textContent = error.message || 'Unable to load bugs';
       }
     }
   }
 
-  $('rows').addEventListener('click', (event) => {
+  $('rows').addEventListener('click', (event) =>
+{
     const toggle = event.target.closest('[data-log-toggle]');
     const earlier = event.target.closest('.load-earlier');
-    if (earlier) { void fetchEvents(earlier.dataset.logId, 'earlier'); return; }
+    if (earlier)
+{
+ void fetchEvents(earlier.dataset.logId, 'earlier'); return;
+}
     if (!toggle) return;
     const id = toggle.dataset.logToggle;
     if (!id) return;
@@ -158,18 +189,29 @@
     renderRows();
     if (expanded.has(id)) void fetchEvents(id, 'initial');
   });
-  $('rows').addEventListener('change', (event) => {
+  $('rows').addEventListener('change', (event) =>
+{
     const checkbox = event.target.closest('.auto-scroll');
     if (checkbox) eventState(checkbox.dataset.logId).autoScroll = checkbox.checked;
   });
 
   $('refresh').onclick = () => void load();
-  ['q', 'target', 'status'].forEach((key) => { $(key).onchange = () => void load({ initial: true }); });
-  setInterval(() => { if (!document.hidden) void load(); }, 2000);
-  setInterval(() => {
+  ['q', 'target', 'status'].forEach((key) =>
+{
+ $(key).onchange = () => void load({ initial: true });
+});
+  setInterval(() =>
+{
+ if (!document.hidden) void load();
+}, 2000);
+  setInterval(() =>
+{
     if (document.hidden) return;
     for (const id of expanded) if (isRunning(bugsById.get(id))) void fetchEvents(id, 'poll');
   }, 1000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) void load(); });
+  document.addEventListener('visibilitychange', () =>
+{
+ if (!document.hidden) void load();
+});
   void load({ initial: true });
 })();

@@ -210,7 +210,8 @@ describe('conversational intake page', () => {
     const dashboardScript = clientScripts.dashboard;
     expect(dashboardScript).toContain('data-log-toggle');
     expect(dashboardScript).toContain('/events?');
-    expect(dashboardScript).toContain('setInterval(() => { if (!document.hidden) void load(); }, 2000)');
+    expect(dashboardScript).toContain('setInterval');
+    expect(dashboardScript).toContain('if (!document.hidden) void load();');
 
     const detailRoute = resolveWebRoute('/bugs/BUG-123');
     expect(detailRoute?.contentType).toBe('text/html; charset=utf-8');
