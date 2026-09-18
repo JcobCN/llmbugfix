@@ -119,12 +119,19 @@ if (llmEnabled) {
   // GitLab account (docs/gitlab-private-repo-api.md). GITLAB_URL defaults to
   // the internal instance; set it to an empty string to push to origin instead.
   const gitlabUrl = process.env.GITLAB_URL !== undefined ? process.env.GITLAB_URL.trim() : 'http://172.29.100.126';
-  const ownPushTarget = gitlabUrl ? new GitLabPushTarget({
+  const gitlabToken = process.env.GITLAB_TOKEN?.trim();
+  const gitlabPassword = process.env.GITLAB_PASSWORD?.trim();
+  const gitlabTarget = gitlabUrl ? new GitLabPushTarget({
     baseUrl: gitlabUrl,
     account: process.env.GITLAB_ACCOUNT?.trim() || 'codigger-llm',
-    ...(process.env.GITLAB_PASSWORD?.trim() ? { password: process.env.GITLAB_PASSWORD.trim() } : {}),
+    ...(gitlabToken ? { token: gitlabToken } : {}),
+    ...(gitlabPassword ? { password: gitlabPassword } : {}),
   }) : undefined;
-  const repoManager = new RepoManager({ worktreesRoot, repositoryRoots: repositories, cloneRoot: repositoriesRoot, allowedRemoteHosts, ownPushTarget });
+  // Keep GitLab secrets only in the target's private in-memory state. Networked
+  // Git commands receive a short-lived per-operation credential environment.
+  delete process.env.GITLAB_TOKEN;
+  delete process.env.GITLAB_PASSWORD;
+  const repoManager = new RepoManager({ worktreesRoot, repositoryRoots: repositories, cloneRoot: repositoriesRoot, allowedRemoteHosts, ownPushTarget: gitlabTarget, gitCredentialProvider: gitlabTarget });
   for (const repository of repositories) repoManager.validateRepoUrl(repository);
   const validBranch = (value: string): boolean => /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/u.test(value) && !value.includes('..') && !value.includes('//') && !value.endsWith('/');
   environments = {

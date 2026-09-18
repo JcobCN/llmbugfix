@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { RepoManager, type OwnPushTarget } from './index.js';
 
-class FakeRunner { calls: string[][] = []; cwds: string[] = []; async run(command: string, args: string[], options: any): Promise<any> { this.calls.push([command, ...args]); this.cwds.push(options.cwd); const text = args.join(' '); if (text.includes('branch --show-current')) return { command, args, exitCode: 0, stdout: 'ai/BUG-000001-fix\n', stderr: '', timedOut: false }; if (text.includes('remote get-url origin')) return { command, args, exitCode: 0, stdout: 'https://localhost/example.git\n', stderr: '', timedOut: false }; if (args[0] === 'rev-parse') return { command, args, exitCode: 0, stdout: 'abc123\n', stderr: '', timedOut: false }; return { command, args, exitCode: 0, stdout: '', stderr: '', timedOut: false }; } }
+class FakeRunner { calls: string[][] = []; cwds: string[] = []; environments: Array<NodeJS.ProcessEnv | undefined> = []; async run(command: string, args: string[], options: any): Promise<any> { this.calls.push([command, ...args]); this.cwds.push(options.cwd); this.environments.push(options.env); const text = args.join(' '); if (text.includes('branch --show-current')) return { command, args, exitCode: 0, stdout: 'ai/BUG-000001-fix\n', stderr: '', timedOut: false }; if (text.includes('remote get-url origin')) return { command, args, exitCode: 0, stdout: 'https://localhost/example.git\n', stderr: '', timedOut: false }; if (args[0] === 'rev-parse') return { command, args, exitCode: 0, stdout: 'abc123\n', stderr: '', timedOut: false }; return { command, args, exitCode: 0, stdout: '', stderr: '', timedOut: false }; } }
 class UntrackedRunner extends FakeRunner {
   intentAdded = false;
   override async run(command: string, args: string[], options: any): Promise<any> {
@@ -32,18 +32,20 @@ describe('RepoManager', () => {
       if (args[0] === 'remote' && args[1] === 'get-url' && args[2] === 'own') return { command, args, exitCode: ownKnown ? 0 : 2, stdout: ownKnown ? `${mirror}\n` : '', stderr: ownKnown ? '' : "error: No such remote 'own'\n", timedOut: false };
       return result;
     } };
-    const manager = new RepoManager({ worktreesRoot: wtRoot, repositoryRoots: [root], allowedRemoteHost: 'localhost', commandRunner: runner as any, ownPushTarget: own });
+    let credentialCalls = 0;
+    const manager = new RepoManager({ worktreesRoot: wtRoot, repositoryRoots: [root], allowedRemoteHost: 'localhost', commandRunner: runner as any, ownPushTarget: own, gitCredentialProvider: { async gitCredentialEnvironment() { credentialCalls += 1; return { LLMBUGFIX_GIT_TOKEN: 'pat-in-memory' }; } } });
     await manager.push(wt, 'ai/BUG-000001-fix');
     expect(requested).toEqual(['example']);
     expect(fake.calls.some((call) => call.join(' ') === `git remote add own ${mirror}`)).toBe(true);
-    const pushed = fake.calls.filter((call) => call[1] === '-c' || call[1] === 'push');
-    expect(pushed.at(-1)).toEqual(['git', '-c', 'credential.helper=store', 'push', 'own', 'refs/heads/ai/BUG-000001-fix:refs/heads/ai/BUG-000001-fix']);
+    const pushed = fake.calls.filter((call) => call[1] === 'push');
+    expect(pushed.at(-1)).toEqual(['git', 'push', 'own', 'refs/heads/ai/BUG-000001-fix:refs/heads/ai/BUG-000001-fix']);
+    expect(credentialCalls).toBe(1);
     expect(fake.calls.some((call) => call.includes('origin') && call[1] === 'push')).toBe(false);
     // a second push reuses the existing remote without re-adding it
     ownKnown = true;
     await manager.push(wt, 'ai/BUG-000001-fix');
     expect(fake.calls.filter((call) => call.join(' ').startsWith('git remote add'))).toHaveLength(1);
-    expect(fake.calls.filter((call) => call[1] === '-c')).toHaveLength(2);
+    expect(credentialCalls).toBe(2);
   });
   it('keeps Chinese titles identifiable with an ASCII-safe branch name', () => {
     const manager = new RepoManager(fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-worktrees-')));

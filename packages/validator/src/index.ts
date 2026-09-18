@@ -7,6 +7,7 @@ import { ValidationResultSchema, type ValidationResult } from '@llmbugfix/bug-do
 
 export interface CommandExecutionResult { command: string; args: string[]; exitCode: number; stdout: string; stderr: string; timedOut: boolean; timeout: boolean; aborted: boolean; }
 export interface CommandRunnerOptions { allowedCwdRoots?: string[]; maxOutputChars?: number; env?: NodeJS.ProcessEnv; }
+export interface CommandExecutionOptions { cwd: string; timeoutMs?: number; signal?: AbortSignal; maxOutputChars?: number; env?: NodeJS.ProcessEnv; }
 export interface CommandProcessHandle {
   readonly command: string;
   readonly args: string[];
@@ -25,19 +26,20 @@ export class CommandRunner {
   constructor(options: CommandRunnerOptions = {}) { this.roots = (options.allowedCwdRoots ?? []).map((root) => fs.realpathSync.native(path.resolve(root))); this.maxOutputChars = options.maxOutputChars ?? 50_000; this.env = { ...process.env, ...options.env, CI: '1' }; }
   private checkCwd(cwd: string): string { const resolved = path.resolve(cwd); if (!this.roots.length) return resolved; let real: string; try { real = fs.realpathSync.native(resolved); } catch { throw new Error(`cwd does not exist: ${cwd}`); } if (!this.roots.some((root) => inside(root, real))) throw new Error(`cwd is outside the configured allowlist: ${cwd}`); return real; }
   /** Start a long-lived argv process without waiting for it to exit. */
-  start(command: string, args: string[] = [], options: { cwd: string; timeoutMs?: number; maxOutputChars?: number }): CommandProcessHandle {
+  start(command: string, args: string[] = [], options: { cwd: string; timeoutMs?: number; maxOutputChars?: number; env?: NodeJS.ProcessEnv }): CommandProcessHandle {
     if (!command || /[;&|<>`$\n\r]/.test(command)) throw new Error('Shell metacharacters are not permitted in command executable');
     const cwd = this.checkCwd(options.cwd); const max = options.maxOutputChars ?? this.maxOutputChars;
+    const env = { ...this.env, ...options.env };
     let stdout = '', stderr = '', timedOut = false, settled = false, killTimer: NodeJS.Timeout | undefined;
     let resolveResult!: (value: CommandExecutionResult) => void;
     const result = new Promise<CommandExecutionResult>((resolve) => { resolveResult = resolve; });
     // Put the supervised runtime in its own process group so stop() can reap
     // children it launched as well as the direct process.
-    const child = spawn(command, args, { cwd, shell: false, detached: true, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { cwd, shell: false, detached: true, env, stdio: ['ignore', 'pipe', 'pipe'] });
     const append = (old: string, data: Buffer | string): string => { const next = old + data.toString(); return next.length > max ? `${next.slice(0, max)}\n... [TRUNCATED]` : next; };
     const sanitize = (value: string): string => {
       let safe = String(redactSecrets(value));
-      for (const [key, secret] of Object.entries(this.env)) if (secret && /password|passwd|token|secret|api[_-]?key|authorization|cookie/i.test(key) && secret.length >= 3) safe = safe.split(secret).join('[REDACTED]');
+      for (const [key, secret] of Object.entries(env)) if (secret && /password|passwd|token|secret|api[_-]?key|authorization|cookie/i.test(key) && secret.length >= 3) safe = safe.split(secret).join('[REDACTED]');
       return safe;
     };
     const finish = (exitCode: number, aborted = false): void => {
@@ -63,14 +65,15 @@ export class CommandRunner {
   }
   /** Alias for callers that use the conventional child-process terminology. */
   spawn(command: string, args: string[] = [], options: { cwd: string; timeoutMs?: number; maxOutputChars?: number }): CommandProcessHandle { return this.start(command, args, options); }
-  async run(command: string, args: string[] = [], options: { cwd: string; timeoutMs?: number; signal?: AbortSignal; maxOutputChars?: number }): Promise<CommandExecutionResult> {
+  async run(command: string, args: string[] = [], options: CommandExecutionOptions): Promise<CommandExecutionResult> {
     if (!command || /[;&|<>`$\n\r]/.test(command)) throw new Error('Shell metacharacters are not permitted in command executable');
     const cwd = this.checkCwd(options.cwd); const timeoutMs = options.timeoutMs ?? 60_000; const max = options.maxOutputChars ?? this.maxOutputChars;
+    const env = { ...this.env, ...options.env };
     return new Promise((resolve) => {
       let stdout = '', stderr = '', timedOut = false, aborted = false, settled = false; let killTimer: NodeJS.Timeout | undefined;
       const append = (old: string, data: Buffer | string) => { const next = old + data.toString(); return next.length > max ? `${next.slice(0, max)}\n... [TRUNCATED]` : next; };
-      const child = spawn(command, args, { cwd, shell: false, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
-      const sanitize = (value: string) => { let safe = String(redactSecrets(value)); for (const [key, secret] of Object.entries(this.env)) if (secret && /password|passwd|token|secret|api[_-]?key|authorization|cookie/i.test(key) && secret.length >= 3) safe = safe.split(secret).join('[REDACTED]'); return safe; };
+      const child = spawn(command, args, { cwd, shell: false, env, stdio: ['ignore', 'pipe', 'pipe'] });
+      const sanitize = (value: string) => { let safe = String(redactSecrets(value)); for (const [key, secret] of Object.entries(env)) if (secret && /password|passwd|token|secret|api[_-]?key|authorization|cookie/i.test(key) && secret.length >= 3) safe = safe.split(secret).join('[REDACTED]'); return safe; };
       const finish = (exitCode: number) => { if (settled) return; settled = true; clearTimeout(timer); if (killTimer) clearTimeout(killTimer); resolve({ command, args: [...args], exitCode, stdout: sanitize(stdout), stderr: sanitize(stderr), timedOut, timeout: timedOut, aborted }); };
       const abort = () => { if (settled) return; aborted = true; child.kill('SIGTERM'); killTimer = setTimeout(() => child.kill('SIGKILL'), 1_000); };
       const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); killTimer = setTimeout(() => child.kill('SIGKILL'), 1_000); }, timeoutMs);

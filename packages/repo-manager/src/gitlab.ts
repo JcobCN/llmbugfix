@@ -1,6 +1,3 @@
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 /**
@@ -8,20 +5,19 @@ import { createHash } from 'node:crypto';
  * under one own GitLab account (see docs/gitlab-private-repo-api.md).
  *
  * The GitLab instance is old, HTTP-only and 2FA-enabled, so both the API and
- * git-over-HTTP require a Personal Access Token. The token is resolved from
- * the git credential store (~/.git-credentials); when absent it is bootstrapped
- * once through the web sign-in flow with the configured account password and
- * appended back to that file so later pushes stay passwordless.
+ * git-over-HTTP require a Personal Access Token. The token stays in process
+ * memory. It can be supplied directly as a PAT, or bootstrapped once through
+ * the web sign-in flow with the configured account password for this process.
  */
 export interface GitLabPushTargetOptions {
   /** GitLab base URL, e.g. http://172.29.100.126 */
   baseUrl: string;
   /** Account namespace that owns the private mirror repositories. */
   account: string;
-  /** Password used only to bootstrap a PAT when none is stored. */
+  /** PAT kept in memory and used for both the API and Git operations. */
+  token?: string;
+  /** Password used only to bootstrap a PAT when no token is configured. */
   password?: string;
-  /** Credential store consulted for a stored PAT; defaults to ~/.git-credentials. */
-  credentialsFile?: string;
   /** Injectable fetch for tests. */
   fetchImpl?: typeof fetch;
   /** Name recorded for PATs created by this target. */
@@ -33,6 +29,15 @@ export interface GitLabPushTargetOptions {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 const projectFlights = new Map<string, Promise<string>>();
+const MEMORY_CREDENTIAL_HELPER = [
+  '!f() {',
+  '  [ "$1" = get ] || return 0;',
+  '  input=$(cat);',
+  '  host=$(printf "%s\\n" "$input" | sed -n "s/^host=//p");',
+  '  if [ "$host" != "$LLMBUGFIX_GIT_HOST" ] && [ "$host" != "$LLMBUGFIX_GIT_HOST_PORT" ]; then return 0; fi;',
+  '  printf "username=%s\\npassword=%s\\n" "$LLMBUGFIX_GIT_USERNAME" "$LLMBUGFIX_GIT_TOKEN";',
+  '}; f',
+].join(' ');
 
 /** Minimal cookie jar: enough for Rails session cookies, no expiry tracking. */
 class CookieJar {
@@ -84,8 +89,8 @@ export function mirrorProjectName(remoteUrl: string): string {
 export class GitLabPushTarget {
   private readonly base: URL;
   private readonly account: string;
+  private readonly configuredToken?: string;
   private readonly password?: string;
-  private readonly credentialsFile: string;
   private readonly fetchImpl: typeof fetch;
   private readonly tokenName: string;
   private readonly timeoutMs: number;
@@ -99,8 +104,8 @@ export class GitLabPushTarget {
     this.base = base;
     this.account = options.account.trim();
     if (!this.account || /[\0\r\n/]/u.test(this.account)) throw new Error('GitLab account is invalid');
+    this.configuredToken = options.token?.trim() || undefined;
     this.password = options.password?.trim() || undefined;
-    this.credentialsFile = path.resolve(options.credentialsFile ?? path.join(os.homedir(), '.git-credentials'));
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.tokenName = options.tokenName ?? 'llmbugfix-push';
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -148,10 +153,8 @@ export class GitLabPushTarget {
     if (this.cachedToken) return this.cachedToken;
     if (this.tokenFlight) return this.tokenFlight;
     this.tokenFlight = (async () => {
-      const stored = this.storedToken();
-      if (stored) { this.cachedToken = stored; return stored; }
+      if (this.configuredToken) { this.cachedToken = this.configuredToken; return this.configuredToken; }
       const created = await this.createToken();
-      this.storeToken(created);
       this.cachedToken = created;
       return created;
     })();
@@ -162,24 +165,9 @@ export class GitLabPushTarget {
     }
   }
 
-  /** PAT for this host+account from the git credential store, if present. */
-  private storedToken(): string | null {
-    let text: string;
-    try { text = fs.readFileSync(this.credentialsFile, 'utf8'); } catch { return null; }
-    for (const raw of text.split('\n')) {
-      const line = raw.trim();
-      if (!line) continue;
-      try {
-        const parsed = new URL(line);
-        if (parsed.hostname === this.base.hostname && parsed.port === this.base.port && parsed.username === this.account && parsed.password) return decodeURIComponent(parsed.password);
-      } catch { /* ignore malformed credential lines */ }
-    }
-    return null;
-  }
-
   /** Bootstrap a PAT through the web sign-in flow (2FA-safe: password login). */
   private async createToken(): Promise<string> {
-    if (!this.password) throw new Error(`No PAT for ${this.account} at ${this.base.host} in ${this.credentialsFile} and no password configured to create one`);
+    if (!this.password) throw new Error(`No PAT for ${this.account} at ${this.base.host} and no GITLAB_TOKEN or password configured`);
     const jar = new CookieJar();
     const signIn = await this.request('GET', '/users/sign_in', { jar });
     const loginToken = authenticityToken(signIn.body);
@@ -208,13 +196,21 @@ export class GitLabPushTarget {
     return token;
   }
 
-  /** Append the PAT to the credential store so git pushes stay passwordless. */
-  private storeToken(token: string): void {
-    let text = '';
-    try { text = fs.readFileSync(this.credentialsFile, 'utf8'); } catch { /* first credential entry */ }
-    if (text && !text.endsWith('\n')) text += '\n';
-    const entry = `http://${encodeURIComponent(this.account)}:${encodeURIComponent(token)}@${this.base.host}`;
-    fs.writeFileSync(this.credentialsFile, `${text}${entry}\n`, { encoding: 'utf8', mode: 0o600 });
+  /** Environment for Git's in-memory credential helper; no credential file is consulted. */
+  async gitCredentialEnvironment(): Promise<NodeJS.ProcessEnv> {
+    const token = await this.resolveToken();
+    return {
+      GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_0: 'credential.helper',
+      GIT_CONFIG_VALUE_0: '',
+      GIT_CONFIG_KEY_1: 'credential.helper',
+      GIT_CONFIG_VALUE_1: MEMORY_CREDENTIAL_HELPER,
+      GIT_TERMINAL_PROMPT: '0',
+      LLMBUGFIX_GIT_HOST: this.base.hostname,
+      LLMBUGFIX_GIT_HOST_PORT: this.base.host,
+      LLMBUGFIX_GIT_USERNAME: this.account,
+      LLMBUGFIX_GIT_TOKEN: token,
+    };
   }
 
   private async request(

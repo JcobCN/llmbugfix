@@ -6,8 +6,7 @@ import { GitLabPushTarget, RepoManager } from '../packages/repo-manager/src/inde
 
 describe('Git remote safety integration contract', () => {
   it('rejects a GitLab push when no credential or explicit password exists', async () => {
-    const credentialsFile = path.join(os.tmpdir(), `llmbugfix-no-credentials-${process.pid}-${Date.now()}`);
-    const target = new GitLabPushTarget({ baseUrl: 'http://git.example.invalid', account: 'llm-bot', credentialsFile });
+    const target = new GitLabPushTarget({ baseUrl: 'http://git.example.invalid', account: 'llm-bot' });
     await expect(target.ensureProject('project')).rejects.toThrow(/no password configured|no pat/i);
   });
 

@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { GitLabPushTarget, mirrorProjectName } from './gitlab.js';
 
 const SIGN_IN_PAGE = '<form><input name="authenticity_token" value="tok-signin" type="hidden"></form>';
@@ -33,8 +31,21 @@ function fakeGitLab(options: { projectExists?: boolean } = {}) {
   return { fetchImpl, calls };
 }
 
-function target(options: Partial<ConstructorParameters<typeof GitLabPushTarget>[0]> & { credentialsFile: string; fetchImpl: typeof fetch }) {
+function target(options: Partial<ConstructorParameters<typeof GitLabPushTarget>[0]> = {}) {
   return new GitLabPushTarget({ baseUrl: 'http://172.29.100.126', account: 'codigger-llm', ...options });
+}
+
+function fillGitCredential(environment: NodeJS.ProcessEnv): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', ['credential', 'fill'], { env: { ...process.env, ...environment } });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.once('error', reject);
+    child.once('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    child.stdin.end('protocol=http\nhost=172.29.100.126\n\n');
+  });
 }
 
 describe('mirrorProjectName', () => {
@@ -54,41 +65,30 @@ describe('mirrorProjectName', () => {
 });
 
 describe('GitLabPushTarget', () => {
-  it('reuses a stored PAT and creates a missing private project', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-gl-'));
-    const credentials = path.join(root, '.git-credentials');
-    fs.writeFileSync(credentials, `http://codigger-llm:pat-stored@172.29.100.126\n`, 'utf8');
+  it('uses a configured PAT and creates a missing private project', async () => {
     const { fetchImpl, calls } = fakeGitLab({ projectExists: false });
-    const url = await target({ credentialsFile: credentials, fetchImpl }).ensureProject('storefront');
+    const url = await target({ token: 'pat-configured', fetchImpl }).ensureProject('storefront');
     expect(url).toBe('http://172.29.100.126/codigger-llm/storefront.git');
     expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
       'GET http://172.29.100.126/api/v4/projects/codigger-llm%2Fstorefront',
       'POST http://172.29.100.126/api/v4/projects',
     ]);
-    expect(calls[0].headers['PRIVATE-TOKEN']).toBe('pat-stored');
+    expect(calls[0].headers['PRIVATE-TOKEN']).toBe('pat-configured');
     expect(calls[1].body).toContain('visibility=private');
     expect(calls[1].body).toContain('name=storefront');
-    // the stored credential file is untouched when a PAT already exists
-    expect(fs.readFileSync(credentials, 'utf8')).toBe('http://codigger-llm:pat-stored@172.29.100.126\n');
   });
 
   it('skips creation when the mirror project already exists', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-gl-'));
-    const credentials = path.join(root, '.git-credentials');
-    fs.writeFileSync(credentials, `http://codigger-llm:pat-stored@172.29.100.126\n`, 'utf8');
     const { fetchImpl, calls } = fakeGitLab({ projectExists: true });
-    const url = await target({ credentialsFile: credentials, fetchImpl }).ensureProject('storefront');
+    const url = await target({ token: 'pat-configured', fetchImpl }).ensureProject('storefront');
     expect(url).toBe('http://172.29.100.126/codigger-llm/storefront.git');
     expect(calls).toHaveLength(1);
     expect(calls[0].method).toBe('GET');
   });
 
   it('single-flights concurrent ensureProject calls for one mirror project', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-gl-'));
-    const credentials = path.join(root, '.git-credentials');
-    fs.writeFileSync(credentials, 'http://codigger-llm:pat-stored@172.29.100.126\n', 'utf8');
     const { fetchImpl, calls } = fakeGitLab({ projectExists: false });
-    const pushTarget = target({ credentialsFile: credentials, fetchImpl });
+    const pushTarget = target({ token: 'pat-configured', fetchImpl });
     const urls = await Promise.all([
       pushTarget.ensureProject('storefront'),
       pushTarget.ensureProject('storefront'),
@@ -103,45 +103,36 @@ describe('GitLabPushTarget', () => {
     expect(calls.filter((call) => call.url.includes('/api/v4/projects/'))).toHaveLength(1);
   });
 
-  it('single-flights PAT bootstrap before creating a project', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-gl-'));
-    const credentials = path.join(root, '.git-credentials');
+  it('bootstraps and caches a PAT in memory when no token is configured', async () => {
     const { fetchImpl, calls } = fakeGitLab({ projectExists: true });
-    const pushTarget = target({ credentialsFile: credentials, fetchImpl, password: 'explicit-test-password' });
+    const pushTarget = target({ fetchImpl, password: 'explicit-test-password' });
     await Promise.all([pushTarget.ensureProject('storefront'), pushTarget.ensureProject('another')]);
     expect(calls.filter((call) => call.url.endsWith('/users/sign_in') && call.method === 'GET')).toHaveLength(1);
     expect(calls.filter((call) => call.url.endsWith('/profile/personal_access_tokens') && call.method === 'POST')).toHaveLength(1);
-    expect(fs.readFileSync(credentials, 'utf8')).toContain('glpat-created123');
+    const environment = await pushTarget.gitCredentialEnvironment();
+    expect(environment.LLMBUGFIX_GIT_TOKEN).toBe('glpat-created123');
+    expect(environment.GIT_CONFIG_VALUE_1).not.toContain('glpat-created123');
   });
 
-  it('bootstraps a PAT through the web session when none is stored', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-gl-'));
-    const credentials = path.join(root, '.git-credentials');
+  it('passes a configured PAT to Git through a host-scoped in-memory helper', async () => {
     const { fetchImpl, calls } = fakeGitLab({ projectExists: true });
-    const url = await target({ credentialsFile: credentials, fetchImpl, password: 'explicit-test-password' }).ensureProject('storefront');
-    expect(url).toBe('http://172.29.100.126/codigger-llm/storefront.git');
-    // web session: sign-in page, login, PAT page, create form, confirm page
-    const flow = calls.filter((call) => !call.url.includes('/api/v4/')).map((call) => `${call.method} ${call.url}`);
-    expect(flow).toEqual([
-      'GET http://172.29.100.126/users/sign_in',
-      'POST http://172.29.100.126/users/sign_in',
-      'GET http://172.29.100.126/profile/personal_access_tokens',
-      'POST http://172.29.100.126/profile/personal_access_tokens',
-      'GET http://172.29.100.126/profile/personal_access_tokens',
-    ]);
-    const login = calls.find((call) => call.url.endsWith('/users/sign_in') && call.method === 'POST')!;
-    expect(login.body).toContain('user%5Blogin%5D=codigger-llm');
-    const create = calls.find((call) => call.url.endsWith('/profile/personal_access_tokens') && call.method === 'POST')!;
-    expect(create.body).toContain('personal_access_token%5Bscopes%5D%5B%5D=api');
-    // the created PAT is persisted for passwordless pushes and used for the API
-    expect(fs.readFileSync(credentials, 'utf8')).toBe('http://codigger-llm:glpat-created123@172.29.100.126\n');
-    expect(calls.find((call) => call.url.includes('/api/v4/'))!.headers['PRIVATE-TOKEN']).toBe('glpat-created123');
+    const pushTarget = target({ fetchImpl, token: 'pat-configured' });
+    await pushTarget.ensureProject('storefront');
+    const environment = await pushTarget.gitCredentialEnvironment();
+    expect(environment.LLMBUGFIX_GIT_TOKEN).toBe('pat-configured');
+    expect(environment.LLMBUGFIX_GIT_USERNAME).toBe('codigger-llm');
+    expect(environment.LLMBUGFIX_GIT_HOST).toBe('172.29.100.126');
+    expect(environment.GIT_CONFIG_VALUE_0).toBe('');
+    expect(environment.GIT_CONFIG_VALUE_1).toContain('LLMBUGFIX_GIT_TOKEN');
+    expect(calls.some((call) => call.url.endsWith('/users/sign_in'))).toBe(false);
+    const filled = await fillGitCredential(environment);
+    expect(filled.code, filled.stderr).toBe(0);
+    expect(filled.stdout).toContain('username=codigger-llm');
+    expect(filled.stdout).toContain('password=pat-configured');
   });
 
   it('rejects an invalid GitLab base URL or account', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'llmbugfix-gl-'));
-    const credentials = path.join(root, '.git-credentials');
-    expect(() => target({ baseUrl: 'ftp://x', credentialsFile: credentials, fetchImpl: fakeGitLab().fetchImpl })).toThrow(/http\(s\)/u);
-    expect(() => target({ account: 'bad/account', credentialsFile: credentials, fetchImpl: fakeGitLab().fetchImpl })).toThrow(/account/u);
+    expect(() => target({ baseUrl: 'ftp://x', token: 'pat-configured', fetchImpl: fakeGitLab().fetchImpl })).toThrow(/http\(s\)/u);
+    expect(() => target({ account: 'bad/account', token: 'pat-configured', fetchImpl: fakeGitLab().fetchImpl })).toThrow(/account/u);
   });
 });

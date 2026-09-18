@@ -10,8 +10,10 @@ export type { GitLabPushTargetOptions } from './gitlab.js';
 
 /** Creates/looks up the own-account private mirror project for a source remote. */
 export interface OwnPushTarget { ensureProject(name: string): Promise<string>; }
+/** Supplies per-process Git credentials without using Git's credential files. */
+export interface GitCredentialProvider { gitCredentialEnvironment(): Promise<NodeJS.ProcessEnv>; }
 
-export interface RepoManagerOptions { worktreesRoot?: string; worktreeRoot?: string; repositoryRoot?: string; repositoryRoots?: string[]; /** Root used for remote repositories cloned from confirmed intake. */ cloneRoot?: string; allowedRemoteHost?: string; allowedRemoteHosts?: string[]; protectedBranches?: string[]; commandRunner?: CommandRunner; /** When set, ai/* branches are pushed to an own-account private mirror instead of origin. */ ownPushTarget?: OwnPushTarget; }
+export interface RepoManagerOptions { worktreesRoot?: string; worktreeRoot?: string; repositoryRoot?: string; repositoryRoots?: string[]; /** Root used for remote repositories cloned from confirmed intake. */ cloneRoot?: string; allowedRemoteHost?: string; allowedRemoteHosts?: string[]; protectedBranches?: string[]; commandRunner?: CommandRunner; /** When set, ai/* branches are pushed to an own-account private mirror instead of origin. */ ownPushTarget?: OwnPushTarget; /** In-memory credentials used by networked Git commands. */ gitCredentialProvider?: GitCredentialProvider; }
 export interface GitOperationResult { exitCode: number; stdout: string; stderr: string; timedOut: boolean; }
 const within = (root: string, value: string) => value === root || value.startsWith(`${root}${path.sep}`);
 const BUG = /^BUG-[0-9]{6,}$/;
@@ -29,6 +31,7 @@ export class RepoManager {
   private readonly allowedRemoteHosts: string[];
   private readonly protectedBranches: string[];
   private readonly ownPushTarget?: OwnPushTarget;
+  private readonly gitCredentialProvider?: GitCredentialProvider;
   private readonly runner: CommandRunner;
   constructor(worktreesRootOrOptions: string | RepoManagerOptions, allowedHosts: string[] = []) {
     const options: RepoManagerOptions = typeof worktreesRootOrOptions === 'string' ? { worktreesRoot: worktreesRootOrOptions, allowedRemoteHosts: allowedHosts } : worktreesRootOrOptions;
@@ -39,6 +42,7 @@ export class RepoManager {
     this.allowedRemoteHosts = options.allowedRemoteHosts ?? (options.allowedRemoteHost ? [options.allowedRemoteHost] : []);
     this.protectedBranches = options.protectedBranches ?? ['main', 'master', 'develop', 'release'];
     this.ownPushTarget = options.ownPushTarget;
+    this.gitCredentialProvider = options.gitCredentialProvider;
     this.runner = options.commandRunner ?? new CommandRunner({ allowedCwdRoots: this.repositoryRoots.length ? [this.worktreesRoot, ...this.repositoryRoots] : [] });
   }
   private repoPath(repo: string): string { const resolved = path.resolve(repo); if (!fs.existsSync(resolved)) throw new Error(`Repository does not exist: ${repo}`); const real = fs.realpathSync.native(resolved); if (!fs.statSync(real).isDirectory() || !fs.existsSync(path.join(real, '.git'))) throw new Error(`Not a git repository: ${repo}`); if (this.repositoryRoots.length && !this.repositoryRoots.some((root) => within(root, real))) throw new Error(`Repository is outside configured roots: ${repo}`); return real; }
@@ -84,7 +88,7 @@ export class RepoManager {
         // only that incomplete checkout before retrying.
         fs.rmSync(target, { recursive: true, force: true });
       }
-      const result = await this.git(cloneRoot, ['clone', '--origin', 'origin', '--', repoUrl, target], 300_000);
+      const result = await this.git(cloneRoot, ['clone', '--origin', 'origin', '--', repoUrl, target], 300_000, true);
       if (result.exitCode !== 0) {
         if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true });
         throw new Error(`git clone failed: ${result.stderr || result.stdout}`);
@@ -101,8 +105,12 @@ export class RepoManager {
     const suffix = slug || `title-${createHash('sha256').update(title).digest('hex').slice(0, 10)}`;
     return `ai/${bugKey}-${suffix}`;
   }
-  private async git(cwd: string, args: string[], timeoutMs = 120_000): Promise<GitOperationResult> { const result = await this.runner.run('git', args, { cwd, timeoutMs }); return result; }
-  private async fetchUnlocked(repo: string, baseBranch: string): Promise<GitOperationResult> { return this.git(repo, ['fetch', 'origin', baseBranch]); }
+  private async git(cwd: string, args: string[], timeoutMs = 120_000, authenticate = false): Promise<GitOperationResult> {
+    const env = authenticate && this.gitCredentialProvider ? await this.gitCredentialProvider.gitCredentialEnvironment() : undefined;
+    const result = await this.runner.run('git', args, { cwd, timeoutMs, ...(env ? { env } : {}) });
+    return result;
+  }
+  private async fetchUnlocked(repo: string, baseBranch: string): Promise<GitOperationResult> { return this.git(repo, ['fetch', 'origin', baseBranch], 120_000, true); }
   async fetch(repoDir: string, baseBranch = 'main'): Promise<GitOperationResult> {
     const repo = this.repoPath(repoDir);
     return repositoryMutex.runExclusive(repo, () => this.fetchUnlocked(repo, baseBranch));
@@ -260,14 +268,12 @@ export class RepoManager {
   private async pushUnlocked(cwd: string, branchName: string): Promise<void> {
     await this.assertPushSafe(cwd, branchName);
     if (!this.ownPushTarget) {
-      const result = await this.git(cwd, ['push', '--set-upstream', 'origin', branchName]);
+      const result = await this.git(cwd, ['push', '--set-upstream', 'origin', branchName], 120_000, true);
       if (result.exitCode !== 0) throw new Error(result.stderr);
       return;
     }
     const remote = await this.ensureOwnRemote(cwd);
-    // credential.helper=store keeps the push passwordless even when the global
-    // git config has no helper configured; the PAT lives in ~/.git-credentials.
-    const result = await this.git(cwd, ['-c', 'credential.helper=store', 'push', remote, `refs/heads/${branchName}:refs/heads/${branchName}`]);
+    const result = await this.git(cwd, ['push', remote, `refs/heads/${branchName}:refs/heads/${branchName}`], 120_000, true);
     if (result.exitCode !== 0) throw new Error(result.stderr);
   }
   async push(worktreePath: string, branchName: string): Promise<void> {
