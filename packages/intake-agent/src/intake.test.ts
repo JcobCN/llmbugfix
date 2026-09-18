@@ -18,6 +18,11 @@ describe('Intake Agent & Service', () => {
     expect(normalizeBugTitle({ title: 'hello', actualBehavior: 'test', component: 'store' })).toBeUndefined();
   });
 
+  it('accepts an empty optional special-environment array in a draft', () => {
+    const merged = mergeDraft({}, { dev_env_special: [] });
+    expect(merged.dev_env_special).toEqual([]);
+  });
+
   it('replaces an early greeting title after the module and problem are known', async () => {
     const result = await new IntakeService(new FakeIntakeModel()).processTurn(
       { title: 'hello', actualBehavior: 'hello' },

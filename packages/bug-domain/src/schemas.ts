@@ -6,7 +6,7 @@ const nullableString = z.string().nullable();
 const devEnvSpecialItemSchema = z.string().trim().min(1).max(50_000);
 const devEnvSpecialSchema = z.preprocess(
   (value) => typeof value === 'string' ? [value] : value,
-  z.array(devEnvSpecialItemSchema).min(1).max(100).optional(),
+  z.array(devEnvSpecialItemSchema).max(100).optional(),
 );
 
 export const BugTypeSchema = z.enum(['functional', 'ui', 'api', 'crash', 'performance', 'data', 'permission', 'compatibility', 'network', 'concurrency', 'unknown']);

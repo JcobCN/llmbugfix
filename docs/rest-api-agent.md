@@ -69,7 +69,7 @@ Idempotency-Key: <1 至 200 字符的稳定键>
 | `title` | 是 | 非空字符串，最多 500 字符 | 简明任务标题 |
 | `executionTarget` | 是 | `frontend` \| `backend` | 执行目标 |
 | `dev_env_snapshot` | 是 | 非空字符串，最多 50000 字符 | 开发环境快照版本，例如 `r35.1` |
-| `dev_env_special` | 否 | 如果填写则为 1 至 100 个非空字符串的数组；每项最多 50000 字符 | 可选的开发环境特殊 module 版本，例如 `["raw-spofer-pel v2.0.200", "another-module v1.2.3"]` |
+| `dev_env_special` | 否 | 如果填写则为 0 至 100 个非空字符串的数组；每项最多 50000 字符；空数组等同于不填写 | 可选的开发环境特殊 module 版本，例如 `["raw-spofer-pel v2.0.200", "another-module v1.2.3"]` |
 | `repository` | 是 | object | Git 仓库信息 |
 | `repository.cloneUrl` | 是 | 字符串，最多 2048 字符 | HTTP(S)、`ssh://` 或 scp 风格 SSH remote |
 | `repository.baseBranch` | 否 | 合法 Git 分支名，最多 255 字符 | 默认 `main` |
@@ -79,7 +79,7 @@ Idempotency-Key: <1 至 200 字符的稳定键>
 | `routing.quality` | 否 | `standard` \| `high` | 默认 `standard` |
 
 `dev_env_snapshot` 对 `bugfix`、`development` 两种任务类型都必填，`dev_env_special` 可填可不填。
-如果填写 `dev_env_special`，数组中的每一项对应一个 module 的特殊版本，推荐按 `raw-spofer-pel v2.0.200` 这种组件及版本格式填写；当前接口校验数组数量、元素非空和长度，不强制固定的版本号正则。
+如果填写 `dev_env_special`，数组中的每一项对应一个 module 的特殊版本；空数组按未填写处理。推荐按 `raw-spofer-pel v2.0.200` 这种组件及版本格式填写；当前接口校验数组数量、元素非空和长度，不强制固定的版本号正则。
 
 仓库约束：
 

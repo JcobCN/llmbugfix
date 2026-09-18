@@ -38,6 +38,21 @@ describe('external API contracts', () => {
     expect(development.taskType).toBe('development');
   });
 
+  it('accepts an empty optional special-environment array', () => {
+    const task = ExternalTaskCreateRequestSchema.parse({
+      taskType: 'bugfix',
+      title: 'Fix login',
+      executionTarget: 'frontend',
+      repository,
+      dev_env_snapshot: 'r35.1',
+      dev_env_special: [],
+      actualBehavior: 'The button does nothing',
+      expectedBehavior: 'The user reaches the home page',
+      reproductionSteps: ['Open login', 'Click the button'],
+    });
+    expect(task.dev_env_special).toEqual([]);
+  });
+
   it('rejects unknown fields, invalid capabilities, and repository credentials', () => {
     expect(() => ExternalTaskCreateRequestSchema.parse({
       taskType: 'development',

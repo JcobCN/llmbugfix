@@ -104,7 +104,10 @@ const ExternalTaskBaseSchema = z.object({
   executionTarget: ExternalExecutionTargetSchema,
   repository: RepositoryTargetSchema,
   dev_env_snapshot: z.string().trim().min(1).max(50_000),
-  dev_env_special: z.array(z.string().trim().min(1).max(50_000)).min(1).max(100).optional(),
+  // An empty list is the JSON form commonly produced when no special module
+  // versions were supplied, so it is equivalent to omitting this optional
+  // field. Items that are present must still be non-empty.
+  dev_env_special: z.array(z.string().trim().min(1).max(50_000)).max(100).optional(),
   routing: RoutingRequirementsSchema.default({}),
 }).strict();
 

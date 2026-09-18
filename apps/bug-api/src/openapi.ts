@@ -247,7 +247,7 @@ export const OPENAPI_DOCUMENT = {
           executionTarget: { type: 'string', enum: ['frontend', 'backend'] },
           repository: schemaRef('RepositoryTarget'),
           dev_env_snapshot: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S', description: 'Development environment release snapshot, for example r35.1.', examples: ['r35.1'] },
-          dev_env_special: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S' }, description: 'Special development environment modules and versions, for example raw-spofer-pel v2.0.200.', examples: [['raw-spofer-pel v2.0.200', 'another-module v1.2.3']] },
+          dev_env_special: { type: 'array', maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S' }, description: 'Optional special development environment modules and versions; an empty array is equivalent to omitting the field.', examples: [['raw-spofer-pel v2.0.200', 'another-module v1.2.3']] },
           actualBehavior: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S' },
           expectedBehavior: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S' },
           reproductionSteps: {
@@ -284,7 +284,7 @@ export const OPENAPI_DOCUMENT = {
           executionTarget: { type: 'string', enum: ['frontend', 'backend'] },
           repository: schemaRef('RepositoryTarget'),
           dev_env_snapshot: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S', description: 'Development environment release snapshot, for example r35.1.', examples: ['r35.1'] },
-          dev_env_special: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S' }, description: 'Special development environment modules and versions, for example raw-spofer-pel v2.0.200.', examples: [['raw-spofer-pel v2.0.200', 'another-module v1.2.3']] },
+          dev_env_special: { type: 'array', maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S' }, description: 'Optional special development environment modules and versions; an empty array is equivalent to omitting the field.', examples: [['raw-spofer-pel v2.0.200', 'another-module v1.2.3']] },
           objective: { type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S' },
           requirements: {
             type: 'array',

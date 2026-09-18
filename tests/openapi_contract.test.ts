@@ -233,9 +233,11 @@ describe('external REST API OpenAPI contract', () => {
     expect(development.required).toEqual(['taskType', 'title', 'executionTarget', 'repository', 'dev_env_snapshot', 'objective', 'requirements', 'acceptanceCriteria']);
     expect(Object.keys(bugfix.properties)).toEqual(expect.arrayContaining(['dev_env_snapshot', 'dev_env_special', 'errorMessages', 'stackTraces', 'environment', 'routing']));
     expect(Object.keys(development.properties)).toEqual(expect.arrayContaining(['dev_env_snapshot', 'dev_env_special', 'constraints', 'nonGoals', 'routing']));
-    expect(bugfix.properties.dev_env_special).toMatchObject({ type: 'array', minItems: 1, maxItems: 100 });
+    expect(bugfix.properties.dev_env_special).toMatchObject({ type: 'array', maxItems: 100 });
+    expect(bugfix.properties.dev_env_special.minItems).toBeUndefined();
     expect(bugfix.properties.dev_env_special.items).toMatchObject({ type: 'string', minLength: 1, maxLength: 50_000, pattern: '\\S' });
-    expect(development.properties.dev_env_special).toMatchObject({ type: 'array', minItems: 1, maxItems: 100 });
+    expect(development.properties.dev_env_special).toMatchObject({ type: 'array', maxItems: 100 });
+    expect(development.properties.dev_env_special.minItems).toBeUndefined();
     expect(bugfix.properties.reproductionSteps).toMatchObject({ minItems: 1, maxItems: 100 });
     expect(development.properties.requirements).toMatchObject({ minItems: 1, maxItems: 100 });
     expect(development.properties.constraints).toMatchObject({ maxItems: 100 });
@@ -322,7 +324,7 @@ describe('external REST API OpenAPI contract', () => {
       { name: 'bugfix stack item', payload: { ...bugfix, stackTraces: ['\n'] }, valid: false },
       { name: 'bugfix dev_env_snapshot', payload: { ...bugfix, dev_env_snapshot: '  ' }, valid: false },
       { name: 'bugfix dev_env_special item', payload: { ...bugfix, dev_env_special: ['\n\t'] }, valid: false },
-      { name: 'bugfix dev_env_special empty array', payload: { ...bugfix, dev_env_special: [] }, valid: false },
+      { name: 'bugfix dev_env_special empty array', payload: { ...bugfix, dev_env_special: [] }, valid: true },
       { name: 'bugfix dev_env_special legacy string', payload: { ...bugfix, dev_env_special: 'raw-spofer-pel v2.0.200' }, valid: false },
       { name: 'development title', payload: { ...development, title: '  ' }, valid: false },
       { name: 'development objective', payload: { ...development, objective: '\t\n' }, valid: false },
@@ -332,7 +334,7 @@ describe('external REST API OpenAPI contract', () => {
       { name: 'development non-goal item', payload: { ...development, nonGoals: ['  '] }, valid: false },
       { name: 'development dev_env_snapshot', payload: { ...development, dev_env_snapshot: '  ' }, valid: false },
       { name: 'development dev_env_special item', payload: { ...development, dev_env_special: ['\n\t'] }, valid: false },
-      { name: 'development dev_env_special empty array', payload: { ...development, dev_env_special: [] }, valid: false },
+      { name: 'development dev_env_special empty array', payload: { ...development, dev_env_special: [] }, valid: true },
     ];
     for (const testCase of taskCases) {
       const zodValid = ExternalTaskCreateRequestSchema.safeParse(testCase.payload).success;
