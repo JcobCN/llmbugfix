@@ -306,10 +306,12 @@ export class TaskService {
     const validation = read('validation.json');
     const review = read('review.json');
     const git = read('git-result.json');
+    const failure = read('failure.json');
     let diff: string | null = null;
     try { diff = safeText(fs.readFileSync(path.join(root, 'diff.patch'), 'utf8'), 200_000); } catch { /* optional */ }
     const delivery = task.status !== 'succeeded' ? null : this.dryRun ? { type: 'patch' as const, pushed: false as const, branch: null, commitSha: null, diff } : git.branch && git.commitSha ? { type: 'git_branch' as const, pushed: true as const, branch: safeText(git.branch, 255), commitSha: safeText(git.commitSha, 64), diff } : null;
-    return ExternalTaskResultSchema.parse({ taskId: bug.id, status: task.status, completedAt: isoOrNow(bug.updatedAt), fix: Object.keys(fix).length ? this.fixSummary(fix) : null, validation: Object.keys(validation).length ? this.validationSummary(validation) : null, review: Object.keys(review).length ? this.reviewSummary(review) : null, delivery, error: task.status === 'failed' ? { code: 'TASK_FAILED', message: safeText(stringValue(fix.error || validation.error || review.error || git.error, 'Task failed')) } : null });
+    const failureError = objectValue(failure.error);
+    return ExternalTaskResultSchema.parse({ taskId: bug.id, status: task.status, completedAt: isoOrNow(bug.updatedAt), fix: Object.keys(fix).length ? this.fixSummary(fix) : null, validation: Object.keys(validation).length ? this.validationSummary(validation) : null, review: Object.keys(review).length ? this.reviewSummary(review) : null, delivery, error: task.status === 'failed' ? { code: safeText(stringValue(failure.failureClass || 'TASK_FAILED'), 100), message: safeText(stringValue(failureError.message || fix.error || validation.error || review.error || git.error, 'Task failed')) } : null });
   }
 
   private normalizeResult(value: Record<string, unknown>, bug: BugReport, task: ExternalTaskResource): ExternalTaskResult {

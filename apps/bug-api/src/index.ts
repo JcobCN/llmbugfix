@@ -554,7 +554,7 @@ export class BugApiServer {
   }
   private artifactsFor(bugKey: string): Record<string, unknown> {
     const root = typeof this.apiConfig.DATA_ROOT === 'string' ? this.apiConfig.DATA_ROOT : 'data'; const dir = path.resolve(root, 'agent-results', bugKey); const result: Record<string, unknown> = {};
-    try { for (const filename of fs.readdirSync(dir)) { if (!/^(bug|fix-task|environment|agent-result|candidate(?:-used)?|validation|review|git-result|pipeline)\.json$|^diff\.patch$/.test(filename)) continue; const full = path.join(dir, filename); const stat = fs.statSync(full); if (!stat.isFile() || stat.size > 2_000_000) continue; const content = fs.readFileSync(full, 'utf8'); result[filename] = filename.endsWith('.json') ? JSON.parse(content) : content; } } catch { /* artifacts are optional until a worker starts */ }
+    try { for (const filename of fs.readdirSync(dir)) { if (!/^(bug|fix-task|environment|agent-result|candidate(?:-used)?|validation|review|git-result|pipeline|failure)\.json$|^diff\.patch$/.test(filename)) continue; const full = path.join(dir, filename); const stat = fs.statSync(full); if (!stat.isFile() || stat.size > 2_000_000) continue; const content = fs.readFileSync(full, 'utf8'); result[filename] = filename.endsWith('.json') ? JSON.parse(content) : content; } } catch { /* artifacts are optional until a worker starts */ }
     return result;
   }
   private cancelBug(bug: any, response: http.ServerResponse): void {

@@ -575,6 +575,46 @@ environments:
     expect(await orchestrator.tick()).toBe(true); expect(getBugStatus(repo, bug.id)).toBe('FIX_FAILED'); const artifactDir = path.join(artifactRoot, bug.bugKey); expect(fs.existsSync(path.join(artifactDir, 'candidate.json'))).toBe(false); expect(fs.existsSync(path.join(artifactDir, 'diff.patch'))).toBe(false);
   });
 
+  it('preserves a valid fixer result and forensic evidence when no diff is produced', async () => {
+    const bug = createPipelineBug(repo, 'Valid result without diff'); queueBug(repo, bug.bugKey); const queued = queue.enqueueJob(bug.id, bug.bugKey);
+    const commandRunner = new CandidateCommandRunner(); commandRunner.diffOutput = '';
+    const agentRunner = new FakePiRunner();
+    const artifactRoot = path.join(dataRootDir, 'agent-results');
+    const orchestrator = new Orchestrator(
+      { DATA_ROOT: dataRootDir } as any, repo, queue, envResolver, new RepoManager({ worktreesRoot: worktreeRootDir, repositoryRoots: [tmpDir, repoDir], allowedRemoteHosts: ['localhost'], commandRunner: commandRunner as any }), new EnvironmentRunner({ commandRunner: commandRunner as any }), agentRunner, new Validator(commandRunner as any), { dryRun: false, artifactRoot },
+    );
+
+    expect(await orchestrator.tick()).toBe(true);
+    expect(getBugStatus(repo, bug.id)).toBe('FIX_FAILED');
+    expect(agentRunner.fixerSessions).toHaveLength(1);
+
+    const artifactDir = path.join(artifactRoot, bug.bugKey);
+    const agentResult = JSON.parse(fs.readFileSync(path.join(artifactDir, 'agent-result.json'), 'utf8')) as Record<string, unknown>;
+    expect(agentResult).toMatchObject({ bugKey: bug.bugKey, status: 'fixed', summary: 'Fake fixer result' });
+    const failure = JSON.parse(fs.readFileSync(path.join(artifactDir, 'failure.json'), 'utf8')) as Record<string, any>;
+    expect(failure).toMatchObject({ bugKey: bug.bugKey, role: 'fixer', failureClass: 'no_diff', agentResult: { bugKey: bug.bugKey, status: 'fixed' } });
+    expect(failure.error).toMatchObject({ name: 'Error', message: 'Fixer produced no diff' });
+    expect(failure.evidence.worktree).toMatchObject({ repositoryPath: repoDir, branch: expect.stringContaining(bug.bugKey), baseCommit: 'a'.repeat(40), headCommit: 'a'.repeat(40), diffBytes: 0, changedFiles: [] });
+    expect(failure.evidence.stats.eventCount).toBeGreaterThan(0);
+
+    const runDirectory = fs.readdirSync(path.join(artifactDir, 'attempts')).find((name) => name.startsWith(`run-${queued.id}-`));
+    expect(runDirectory).toBeDefined();
+    const fixerDirectory = fs.readdirSync(path.join(artifactDir, 'attempts', runDirectory!)).find((name) => name.startsWith('fixer-'));
+    expect(fixerDirectory).toBeDefined();
+    const attemptDir = path.join(artifactDir, 'attempts', runDirectory!, fixerDirectory!);
+    expect(fs.existsSync(path.join(attemptDir, 'result.json'))).toBe(true);
+    expect(fs.existsSync(path.join(attemptDir, 'failure.json'))).toBe(true);
+    expect(fs.existsSync(path.join(attemptDir, 'events.jsonl'))).toBe(true);
+    expect(fs.readFileSync(path.join(attemptDir, 'events.jsonl'), 'utf8')).toContain('fixer completed');
+    expect(fs.readFileSync(path.join(attemptDir, 'diff.patch'), 'utf8')).toBe('');
+
+    const runs = db.prepare("SELECT status, output, error, failure_class FROM agent_runs WHERE bug_id = ? AND agent_type = 'fixer'").all(bug.id) as Array<{ status: string; output: string | null; error: string | null; failure_class: string | null }>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: 'FAILED', failure_class: 'no_diff', error: 'Fixer produced no diff' });
+    expect(runs[0].output).not.toBeNull();
+    expect(JSON.parse(runs[0].output!)).toMatchObject({ bugKey: bug.bugKey, status: 'fixed' });
+  });
+
   it('recovers a fixer candidate without rerunning the fixer and archives it after both gates', async () => {
     const bug = createPipelineBug(repo, 'Recover candidate fix'); queueBug(repo, bug.bugKey); queue.enqueueJob(bug.id, bug.bugKey);
     const { artifactDir } = writeCandidateArtifacts(path.join(dataRootDir, 'agent-results'), bug.bugKey);

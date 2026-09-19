@@ -33,6 +33,13 @@ class PipelineCancelledError extends Error { constructor() { super('Pipeline can
 
 type FixResult = ReturnType<typeof AgentFixResultSchema.parse> | ReturnType<typeof AgentTaskResultSchema.parse>;
 type Role = 'fixer' | 'reviewer';
+type AttemptEvidenceStats = {
+  eventCount: number;
+  toolCallCount: number;
+  toolErrorCount: number;
+  tools: Record<string, { calls: number; errors: number }>;
+  lastEventAt: string | null;
+};
 
 export class Orchestrator {
   private timer?: NodeJS.Timeout;
@@ -159,6 +166,46 @@ export class Orchestrator {
     this.checkpoint(job, bugId); this.writeRawArtifact(dir, filename, value);
   }
 
+  private appendEvidenceEvent(job: QueueJob, bugId: string, filename: string, value: unknown): void {
+    this.checkpoint(job, bugId);
+    fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+    fs.appendFileSync(filename, `${JSON.stringify(value)}\n`, { encoding: 'utf8', mode: 0o600 });
+    try { fs.chmodSync(filename, 0o600); } catch { /* best effort */ }
+  }
+
+  private async captureWorktreeEvidence(worktreePath: string, repositoryPath: string, branch: string | undefined, baseCommit: string | undefined): Promise<{ snapshot: Record<string, unknown>; diff: string }> {
+    const errors: string[] = [];
+    const snapshot: Record<string, unknown> = {
+      configuredPath: worktreePath,
+      repositoryPath,
+      branch: branch ?? null,
+      baseCommit: baseCommit ?? null,
+      exists: fs.existsSync(worktreePath),
+      realpath: null,
+      headCommit: null,
+      changedFiles: [],
+      diffBytes: 0,
+      diffSha256: null,
+      errors,
+    };
+    if (!snapshot.exists) {
+      errors.push('Worktree does not exist at evidence collection time');
+      return { snapshot, diff: '' };
+    }
+    try { snapshot.realpath = fs.realpathSync.native(worktreePath); }
+    catch (error) { errors.push(`realpath: ${sanitizeDiagnostic(error instanceof Error ? error.message : String(error), 512)}`); }
+    try { snapshot.headCommit = await this.repoManager.headCommit(worktreePath); }
+    catch (error) { errors.push(`headCommit: ${sanitizeDiagnostic(error instanceof Error ? error.message : String(error), 512)}`); }
+    try { snapshot.changedFiles = await this.repoManager.filesChanged(worktreePath); }
+    catch (error) { errors.push(`changedFiles: ${sanitizeDiagnostic(error instanceof Error ? error.message : String(error), 512)}`); }
+    let diff = '';
+    try { diff = await this.repoManager.diff(worktreePath); }
+    catch (error) { errors.push(`diff: ${sanitizeDiagnostic(error instanceof Error ? error.message : String(error), 512)}`); }
+    snapshot.diffBytes = Buffer.byteLength(diff, 'utf8');
+    snapshot.diffSha256 = createHash('sha256').update(diff).digest('hex');
+    return { snapshot, diff };
+  }
+
   private isLeaseStillOwned(job: QueueJob, bugId: string): boolean {
     try { this.checkpoint(job, bugId); return true; } catch { return false; }
   }
@@ -179,9 +226,29 @@ export class Orchestrator {
     this.checkpoint(job, bug.id); this.repo.changeBugStatus(bug.bugKey, status, 'pipeline', payload);
   }
 
-  private progressSink(job: QueueJob, jobId: string, bugId: string): (event: PiProgressEvent) => void {
+  private progressSink(job: QueueJob, jobId: string, bugId: string, evidencePath?: string, stats?: AttemptEvidenceStats): (event: PiProgressEvent) => void {
     return (event) => {
-      try { this.checkpoint(job, bugId); this.repo.appendWorkerEvent({ ...event, jobId, bugId }); }
+      try {
+        this.checkpoint(job, bugId);
+        this.repo.appendWorkerEvent({ ...event, jobId, bugId });
+        if (stats) {
+          stats.eventCount += 1;
+          stats.lastEventAt = now();
+          if (event.eventType === 'tool_execution_start' && event.tool) {
+            stats.toolCallCount += 1;
+            const tool = stats.tools[event.tool] ?? { calls: 0, errors: 0 };
+            tool.calls += 1;
+            stats.tools[event.tool] = tool;
+          }
+          if (event.eventType === 'tool_execution_end' && event.tool && event.isError) {
+            stats.toolErrorCount += 1;
+            const tool = stats.tools[event.tool] ?? { calls: 0, errors: 0 };
+            tool.errors += 1;
+            stats.tools[event.tool] = tool;
+          }
+        }
+        if (evidencePath) this.appendEvidenceEvent(job, bugId, evidencePath, { occurredAt: now(), ...event });
+      }
       catch (error) { if (error instanceof LeaseFencedError || error instanceof PipelineCancelledError) throw error;
         logger.warn({ jobId, bugId, error: error instanceof Error ? error.message : String(error) }, 'Worker progress event persistence failed'); }
     };
@@ -284,7 +351,7 @@ export class Orchestrator {
     return classifyBackendFailure(error) as BackendFailureClass;
   }
 
-  private async processFixerAttempt(job: QueueJob, bug: BugReport, task: CodingTask, profile: EnvironmentProfile, resolved: ResolvedEnvironment, worktreePath: string, cancellation: AbortSignal, artifactDir: string, attempt: number, tracker: BackendAttemptTracker, fixerBackendIds: string[]): Promise<{ result: FixResult; backendId: string; diff: string; files: string[] }> {
+  private async processFixerAttempt(job: QueueJob, bug: BugReport, task: CodingTask, profile: EnvironmentProfile, resolved: ResolvedEnvironment, worktreePath: string, cancellation: AbortSignal, artifactDir: string, attempt: number, tracker: BackendAttemptTracker, fixerBackendIds: string[], branch?: string, baseCommit?: string): Promise<{ result: FixResult; backendId: string; diff: string; files: string[] }> {
     const selected = await this.acquireRole(job, 'fixer', task, cancellation, tracker.attemptedBackendIds());
     let leaseReleased = false;
     let attemptDir: string;
@@ -301,18 +368,31 @@ export class Orchestrator {
       input = { bugKey: bug.bugKey, role: 'fixer', backendId: selected.backendId, model: selected.lease?.model ?? null, attempt };
       runId = this.beginAgentRun(bug, job, 'fixer', attempt, selected.backendId, selected.lease?.model ?? null, selected.lease?.leaseId ?? null, input);
     } catch (error) { if (selected.lease) { try { this.options.dispatcher!.release(selected.lease); } catch { /* release is best effort during fencing */ } } throw error; }
-    const runnerInput = { worktreePath, task, profile, safety: 'No network, push, merge, deploy, production access, or dependency downloads.', docs: resolved.markdown.map((x) => ({ path: x.path, content: x.content })), skills: resolved.skills.map((x) => ({ path: x.path, content: x.content })), attachments: this.attachmentsFor(bug).map((x) => ({ id: x.id, text: x.extractedText ?? undefined, analysis: x.analysisResult ?? undefined })), signal: cancellation, progress: this.progressSink(job, job.id, bug.id), backendId: selected.backendId };
+    const evidencePath = path.join(attemptDir, 'events.jsonl');
+    const evidenceStats: AttemptEvidenceStats = { eventCount: 0, toolCallCount: 0, toolErrorCount: 0, tools: {}, lastEventAt: null };
+    const attemptStartedAt = now();
+    // Create the file even when the runner fails before emitting its first
+    // session event. This makes absence of events observable instead of
+    // looking like missing evidence.
+    this.fencedRawArtifact(job, bug.id, attemptDir, 'events.jsonl', '');
+    let result: FixResult | undefined;
+    const runnerInput = { worktreePath, task, profile, safety: 'No network, push, merge, deploy, production access, or dependency downloads.', docs: resolved.markdown.map((x) => ({ path: x.path, content: x.content })), skills: resolved.skills.map((x) => ({ path: x.path, content: x.content })), attachments: this.attachmentsFor(bug).map((x) => ({ id: x.id, text: x.extractedText ?? undefined, analysis: x.analysisResult ?? undefined })), signal: cancellation, progress: this.progressSink(job, job.id, bug.id, evidencePath, evidenceStats), backendId: selected.backendId };
     try {
       this.checkpoint(job, bug.id);
       const raw = task.taskType === 'development' ? await selected.runner.runCoder!(runnerInput as never) : await selected.runner.runFixer({ ...runnerInput, task: BugFixTaskSchema.parse(task) });
-      const result = task.taskType === 'development' ? AgentTaskResultSchema.parse(raw) : AgentFixResultSchema.strict().parse(raw);
+      result = task.taskType === 'development' ? AgentTaskResultSchema.parse(raw) : AgentFixResultSchema.strict().parse(raw);
       // Backend capacity covers only the live Pi session. Diff collection and
       // result persistence are local operations and must not hold the slot.
       this.checkpoint(job, bug.id);
       if (selected.lease) { this.options.dispatcher!.complete(selected.lease); leaseReleased = true; }
+      // Persist the model's structured conclusion before checking the
+      // worktree. A valid result with no diff is still essential failure
+      // evidence and must not be discarded by the no-diff guard.
+      this.fencedArtifact(job, bug.id, attemptDir, 'metadata.json', { ...input, startedAt: attemptStartedAt });
+      this.fencedArtifact(job, bug.id, attemptDir, 'result.json', result);
+      this.fencedArtifact(job, bug.id, artifactDir, 'agent-result.json', result);
       const files = await this.repoManager.filesChanged(worktreePath); const diff = await this.repoManager.diff(worktreePath);
       if (!diff.trim() || !files.length) throw Object.assign(new Error('Fixer produced no diff'), { failureClass: 'no_diff' });
-      this.fencedArtifact(job, bug.id, attemptDir, 'metadata.json', input); this.fencedArtifact(job, bug.id, attemptDir, 'result.json', result);
       this.finishAgentRun(job, bug.id, runId, 'COMPLETED', result, null, null);
       return { result, backendId: selected.backendId, diff, files };
     } catch (error) {
@@ -324,9 +404,28 @@ export class Orchestrator {
       }
       const failureClass = this.classify(error);
       if (error instanceof PiAgentOutputFormatError) this.fencedRawArtifact(job, bug.id, attemptDir, 'raw-output.txt', error.rawOutput);
-      try { this.fencedRawArtifact(job, bug.id, attemptDir, 'diff.patch', await this.repoManager.diff(worktreePath)); } catch (e) { if (e instanceof LeaseFencedError || e instanceof PipelineCancelledError) throw e; /* evidence is best effort */ }
-      this.fencedArtifact(job, bug.id, attemptDir, 'failure.json', { ...input, error: sanitizeDiagnostic(error instanceof Error ? error.message : String(error), 2048), failureClass });
-      this.finishAgentRun(job, bug.id, runId, cancellation.aborted ? 'CANCELLED' : 'FAILED', null, error, failureClass);
+      const workspaceEvidence = await this.captureWorktreeEvidence(worktreePath, profile.repository, branch, baseCommit);
+      try { this.fencedRawArtifact(job, bug.id, attemptDir, 'diff.patch', workspaceEvidence.diff); } catch (e) { if (e instanceof LeaseFencedError || e instanceof PipelineCancelledError) throw e; /* evidence is best effort */ }
+      const errorMessage = sanitizeDiagnostic(error instanceof Error ? error.message : String(error), 2048);
+      const errorDetails = {
+        name: error instanceof Error ? error.name : 'UnknownError',
+        message: errorMessage,
+        stack: error instanceof Error && error.stack ? sanitizeDiagnostic(error.stack, 4096) : null,
+      };
+      const failureEvidence = {
+        ...input,
+        startedAt: attemptStartedAt,
+        finishedAt: now(),
+        failureClass,
+        error: errorDetails,
+        agentResult: result ?? null,
+        evidence: { eventsFile: 'events.jsonl', stats: evidenceStats, worktree: workspaceEvidence.snapshot },
+      };
+      this.fencedArtifact(job, bug.id, attemptDir, 'failure.json', failureEvidence);
+      // Keep the latest terminal failure at the bug root so existing API and
+      // operators can inspect it without knowing the attempt directory.
+      this.fencedArtifact(job, bug.id, artifactDir, 'failure.json', { ...failureEvidence, attemptArtifactDir: path.relative(artifactDir, attemptDir) });
+      this.finishAgentRun(job, bug.id, runId, cancellation.aborted ? 'CANCELLED' : 'FAILED', result ?? null, error, failureClass);
       if (selected.lease && !leaseReleased) this.options.dispatcher!.fail(selected.lease, failureClass);
       throw Object.assign(error instanceof Error ? error : new Error(String(error)), { failureClass, backendId: selected.backendId });
     } finally {
@@ -336,7 +435,7 @@ export class Orchestrator {
     }
   }
 
-  private async processReviewerAttempt(job: QueueJob, bug: BugReport, task: CodingTask, profile: EnvironmentProfile, worktreePath: string, cancellation: AbortSignal, artifactDir: string, attempt: number, tracker: BackendAttemptTracker, fixerBackendId: string, diff: string, files: string[], validation: DeterministicValidation): Promise<{ review: ReturnType<typeof ReviewResultSchema.parse>; backendId: string }> {
+  private async processReviewerAttempt(job: QueueJob, bug: BugReport, task: CodingTask, profile: EnvironmentProfile, worktreePath: string, cancellation: AbortSignal, artifactDir: string, attempt: number, tracker: BackendAttemptTracker, fixerBackendId: string, diff: string, files: string[], validation: DeterministicValidation, branch?: string, baseCommit?: string): Promise<{ review: ReturnType<typeof ReviewResultSchema.parse>; backendId: string }> {
     const excluded = fixerBackendId ? [fixerBackendId, ...tracker.attemptedBackendIds()] : tracker.attemptedBackendIds();
     let selected: { lease: BackendLease | null; runner: AgentRunner; backendId: string };
     try { selected = await this.acquireRole(job, 'reviewer', task, cancellation, excluded); }
@@ -357,13 +456,20 @@ export class Orchestrator {
       input = { bugKey: bug.bugKey, role: 'reviewer', backendId: selected.backendId, model: selected.lease?.model ?? null, attempt };
       runId = this.beginAgentRun(bug, job, 'reviewer', attempt, selected.backendId, selected.lease?.model ?? null, selected.lease?.leaseId ?? null, input);
     } catch (error) { if (selected.lease) { try { this.options.dispatcher!.release(selected.lease); } catch { /* release is best effort during fencing */ } } throw error; }
+    const evidencePath = path.join(attemptDir, 'events.jsonl');
+    const evidenceStats: AttemptEvidenceStats = { eventCount: 0, toolCallCount: 0, toolErrorCount: 0, tools: {}, lastEventAt: null };
+    const attemptStartedAt = now();
+    // Create the file even when the reviewer fails before its first session
+    // event, so missing event evidence is itself observable.
+    this.fencedRawArtifact(job, bug.id, attemptDir, 'events.jsonl', '');
+    let review: ReturnType<typeof ReviewResultSchema.parse> | undefined;
     try {
       this.checkpoint(job, bug.id);
       const reviewSchema = task.taskType === 'development' ? DevelopmentReviewResultSchema.strict() : BugReviewResultSchema.strict();
-      const review = reviewSchema.parse(await selected.runner.runReviewer({ worktreePath, task, profile, diff, filesChanged: files, validation, signal: cancellation, progress: this.progressSink(job, job.id, bug.id), backendId: selected.backendId }));
+      review = reviewSchema.parse(await selected.runner.runReviewer({ worktreePath, task, profile, diff, filesChanged: files, validation, signal: cancellation, progress: this.progressSink(job, job.id, bug.id, evidencePath, evidenceStats), backendId: selected.backendId }));
       this.checkpoint(job, bug.id);
       if (selected.lease) { this.options.dispatcher!.complete(selected.lease); leaseReleased = true; }
-      this.fencedArtifact(job, bug.id, attemptDir, 'metadata.json', input); this.fencedArtifact(job, bug.id, attemptDir, 'result.json', review);
+      this.fencedArtifact(job, bug.id, attemptDir, 'metadata.json', { ...input, startedAt: attemptStartedAt }); this.fencedArtifact(job, bug.id, attemptDir, 'result.json', review);
       this.finishAgentRun(job, bug.id, runId, 'COMPLETED', review, null, null);
       return { review, backendId: selected.backendId };
     } catch (error) {
@@ -375,9 +481,26 @@ export class Orchestrator {
       }
       const failureClass = this.classify(error);
       if (error instanceof PiAgentOutputFormatError) this.fencedRawArtifact(job, bug.id, attemptDir, 'raw-output.txt', error.rawOutput);
-      this.fencedRawArtifact(job, bug.id, attemptDir, 'diff.patch', diff);
-      this.fencedArtifact(job, bug.id, attemptDir, 'failure.json', { ...input, error: sanitizeDiagnostic(error instanceof Error ? error.message : String(error), 2048), failureClass });
-      this.finishAgentRun(job, bug.id, runId, cancellation.aborted ? 'CANCELLED' : 'FAILED', null, error, failureClass);
+      const workspaceEvidence = await this.captureWorktreeEvidence(worktreePath, profile.repository, branch, baseCommit);
+      this.fencedRawArtifact(job, bug.id, attemptDir, 'diff.patch', workspaceEvidence.diff || diff);
+      const errorMessage = sanitizeDiagnostic(error instanceof Error ? error.message : String(error), 2048);
+      const errorDetails = {
+        name: error instanceof Error ? error.name : 'UnknownError',
+        message: errorMessage,
+        stack: error instanceof Error && error.stack ? sanitizeDiagnostic(error.stack, 4096) : null,
+      };
+      const failureEvidence = {
+        ...input,
+        startedAt: attemptStartedAt,
+        finishedAt: now(),
+        failureClass,
+        error: errorDetails,
+        agentResult: review ?? null,
+        evidence: { eventsFile: 'events.jsonl', stats: evidenceStats, worktree: workspaceEvidence.snapshot },
+      };
+      this.fencedArtifact(job, bug.id, attemptDir, 'failure.json', failureEvidence);
+      this.fencedArtifact(job, bug.id, artifactDir, 'failure.json', { ...failureEvidence, attemptArtifactDir: path.relative(artifactDir, attemptDir) });
+      this.finishAgentRun(job, bug.id, runId, cancellation.aborted ? 'CANCELLED' : 'FAILED', review ?? null, error, failureClass);
       if (selected.lease && !leaseReleased) this.options.dispatcher!.fail(selected.lease, failureClass);
       throw Object.assign(error instanceof Error ? error : new Error(String(error)), { failureClass, backendId: selected.backendId });
     } finally {
@@ -465,7 +588,7 @@ export class Orchestrator {
         fix = { result: recovered, backendId: '', diff: candidateDiff, files: candidateFiles };
       } else {
         for (let attempt = 1; attempt <= 2 && !fix; attempt += 1) {
-          try { fix = await this.processFixerAttempt(job, bug, task, profile, resolved, worktreePath, cancellation.signal, artifactDir, attempt, fixerTracker, []); fixerBackendId = fix.backendId; }
+          try { fix = await this.processFixerAttempt(job, bug, task, profile, resolved, worktreePath, cancellation.signal, artifactDir, attempt, fixerTracker, [], branch, baseCommit); fixerBackendId = fix.backendId; }
           catch (error) {
             lastFailure = error; const failureClass = (error as { failureClass?: BackendFailureClass }).failureClass ?? this.classify(error);
             if (cancellation.signal.aborted) throw new PipelineCancelledError();
@@ -500,7 +623,7 @@ export class Orchestrator {
       if (!validation.passed) { await this.transition(job, bug, 'VALIDATION_FAILED', validation); pipeline.status = 'VALIDATION_FAILED'; pipeline.error = 'Deterministic validation failed'; writeTerminalArtifact(); this.queue.failJob(job.id, 'Deterministic validation failed', workerId, leaseToken, 'validation_failed'); return; }
       await this.transition(job, bug, 'REVIEWING'); const diff = await this.repoManager.diff(worktreePath); const files = await this.repoManager.filesChanged(worktreePath); this.fencedRawArtifact(job, bug.id, artifactDir, 'diff.patch', diff);
       const reviewerTracker = new BackendAttemptTracker('reviewer'); let reviewResult: ReturnType<typeof ReviewResultSchema.parse> | undefined; let reviewerLastFailure: unknown;
-      for (let attempt = 1; attempt <= 2 && !reviewResult; attempt += 1) { try { reviewResult = (await this.processReviewerAttempt(job, bug, task, profile, worktreePath, cancellation.signal, artifactDir, attempt, reviewerTracker, fixerBackendId, diff, files, validation)).review; } catch (error) { reviewerLastFailure = error; if (cancellation.signal.aborted) throw new PipelineCancelledError(); const failureClass = (error as { failureClass?: BackendFailureClass }).failureClass ?? this.classify(error); const retryable = isInfrastructureFailure(failureClass) || failureClass === 'contract'; if (!retryable || attempt >= 2 || !this.options.dispatcher) break; } }
+      for (let attempt = 1; attempt <= 2 && !reviewResult; attempt += 1) { try { reviewResult = (await this.processReviewerAttempt(job, bug, task, profile, worktreePath, cancellation.signal, artifactDir, attempt, reviewerTracker, fixerBackendId, diff, files, validation, branch, baseCommit)).review; } catch (error) { reviewerLastFailure = error; if (cancellation.signal.aborted) throw new PipelineCancelledError(); const failureClass = (error as { failureClass?: BackendFailureClass }).failureClass ?? this.classify(error); const retryable = isInfrastructureFailure(failureClass) || failureClass === 'contract'; if (!retryable || attempt >= 2 || !this.options.dispatcher) break; } }
       if (!reviewResult) { const error = 'Reviewer backend failed'; await this.transition(job, bug, 'FIX_FAILED', { phase: 'reviewer', error: sanitizeDiagnostic(reviewerLastFailure instanceof Error ? reviewerLastFailure.message : String(reviewerLastFailure ?? 'Reviewer failed'), 2048) }); pipeline.status = 'FIX_FAILED'; pipeline.error = error; writeTerminalArtifact(); this.queue.failJob(job.id, error, workerId, leaseToken, (reviewerLastFailure as { failureClass?: string })?.failureClass); return; }
       this.fencedArtifact(job, bug.id, artifactDir, 'review.json', reviewResult); const acceptance = reviewResult.acceptanceCriteriaMet ?? []; const addressed = task.taskType === 'development' ? reviewResult.taskAddressed === true && acceptance.length === task.acceptanceCriteria.length && acceptance.every((item) => item.met) : reviewResult.bugAddressed === true;
       if (reviewResult.verdict !== 'approve' || !addressed || reviewResult.regressionRisk === 'high') { await this.transition(job, bug, 'REVIEW_REJECTED', reviewResult); pipeline.status = 'REVIEW_REJECTED'; pipeline.error = reviewResult.summary; writeTerminalArtifact(); this.queue.failJob(job.id, `Review gate rejected: ${reviewResult.summary}`, workerId, leaseToken, 'review_rejected'); return; }

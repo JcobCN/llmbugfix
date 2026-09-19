@@ -1,6 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
-import { newId } from '@llmbugfix/shared';
+import { newId, redactSecrets } from '@llmbugfix/shared';
 import {
   AgentFixResultSchema,
   AgentTaskResultSchema,
@@ -57,8 +57,17 @@ export type PiProgressEvent = {
   turnIndex?: number | null;
   toolCallCount?: number | null;
   summary: string;
+  /** Bounded, redacted evidence for the durable per-attempt JSONL audit. */
+  toolAudit?: PiToolAudit;
 };
 export type PiProgressSink = (event: PiProgressEvent) => void | Promise<void>;
+
+export type PiToolAudit = {
+  toolCallId: string;
+  args?: Record<string, string | number>;
+  resultText?: string;
+  durationMs?: number;
+};
 
 /** Minimal structural logger so callers can pass a pino logger without a package dependency. */
 export type PiRunnerLogger = { info: (obj: object, msg: string) => void; error: (obj: object, msg: string) => void };
@@ -354,10 +363,33 @@ function summarizePersistedToolParams(tool: string, params: unknown): Record<str
   return summary;
 }
 
+function toolResultText(result: unknown): string {
+  if (typeof result === 'string') return result;
+  if (result && typeof result === 'object') {
+    const content = (result as { content?: unknown }).content;
+    if (Array.isArray(content)) {
+      const text = content
+        .map((item) => item && typeof item === 'object' && typeof (item as { text?: unknown }).text === 'string' ? (item as { text: string }).text : '')
+        .filter(Boolean)
+        .join('\n');
+      if (text) return text;
+    }
+  }
+  try { return JSON.stringify(result); } catch { return String(result); }
+}
+
+function summarizeToolResult(tool: string, result: unknown, isError: boolean): string | undefined {
+  // Successful reads contain source files. Keep the path/offset metadata, but
+  // never duplicate whole file contents into the forensic audit artifact.
+  if (tool === 'read' && !isError) return undefined;
+  const text = String(redactSecrets(toolResultText(result) ?? ''));
+  return redactedToolValue(text, isError ? 12_000 : 4_000);
+}
+
 const redactedToolValue = (value: string, max = 500): string => {
   // Tool audit logs are deliberately summaries, not a transcript. Redact the
   // common credential-shaped command arguments before applying the size cap.
-  const safe = value.replace(/((?:api[_-]?key|token|secret|password|passwd|authorization|cookie)\s*[=:]\s*)([^\s,;]+)/giu, '$1[REDACTED]');
+  const safe = value.replace(/((?:api[_-]?key|token|secret|password|passwd|authorization|cookie)\s*[=:]\s*)(?:bearer\s+)?([^\s,;"']+)/giu, '$1[REDACTED]');
   return safe.length > max ? `${safe.slice(0, max)}…` : safe;
 };
 
@@ -740,6 +772,7 @@ export class PiAgentRunner implements AgentRunner {
     const closeoutGraceMs = role === 'fixer' ? this.fixerCloseoutGraceMs : this.reviewerCloseoutGraceMs;
     const completionName = role === 'fixer' ? 'submit_fix_result' : 'submit_review_result';
     const closeoutText = `Stop inspecting and editing now. Submit the structured result with ${completionName} or the exact JSON fallback immediately. Do not start another tool call.`;
+    const toolStarts = new Map<string, { startedAt: number; args: Record<string, string | number> }>();
     const emitProgress = (event: PiProgressEvent): void => {
       if (!progress) return;
       try { void Promise.resolve(progress(event)).catch((error) => this.logger?.error({ role, error: error instanceof Error ? error.message : String(error) }, 'pi progress sink failed')); }
@@ -758,15 +791,28 @@ export class PiAgentRunner implements AgentRunner {
         previousToolSignature = signature;
         summary.toolCalls = toolCalls;
         summary.repeatedToolCalls = repeatedToolCalls;
+        toolStarts.set(event.toolCallId, { startedAt: Date.now(), args: summarizeToolParams(event.toolName, event.args) });
       }
       if (event.type === 'tool_execution_end') { summary.tool = event.toolName; summary.isError = event.isError; }
       if (event.type === 'turn_start' || event.type === 'turn_end' || event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
         const tool = 'toolName' in event && typeof event.toolName === 'string' ? event.toolName : undefined;
         const persistedParams = tool && 'args' in event ? summarizePersistedToolParams(tool, event.args) : {};
+        let toolAudit: PiToolAudit | undefined;
+        if (event.type === 'tool_execution_start' && tool) {
+          toolAudit = { toolCallId: event.toolCallId, args: summarizeToolParams(tool, event.args) };
+        } else if (event.type === 'tool_execution_end' && tool) {
+          const started = toolStarts.get(event.toolCallId);
+          toolAudit = {
+            toolCallId: event.toolCallId,
+            ...(started ? { args: started.args, durationMs: Math.max(0, Date.now() - started.startedAt) } : {}),
+            ...(summarizeToolResult(tool, event.result, event.isError) === undefined ? {} : { resultText: summarizeToolResult(tool, event.result, event.isError) }),
+          };
+          toolStarts.delete(event.toolCallId);
+        }
         const safeSummary = event.type === 'tool_execution_start' && tool
           ? `${tool} started${Object.keys(persistedParams).length ? ` (${JSON.stringify(persistedParams)})` : ''}`
           : event.type === 'tool_execution_end' && tool ? `${tool} completed` : event.type.replaceAll('_', ' ');
-        emitProgress({ role, eventType: event.type, ...(tool ? { tool } : {}), ...('isError' in event && typeof event.isError === 'boolean' ? { isError: event.isError } : {}), ...(eventTurnIndex === undefined ? {} : { turnIndex: eventTurnIndex }), ...(toolCalls ? { toolCallCount: toolCalls } : {}), summary: safeSummary });
+        emitProgress({ role, eventType: event.type, ...(tool ? { tool } : {}), ...('isError' in event && typeof event.isError === 'boolean' ? { isError: event.isError } : {}), ...(eventTurnIndex === undefined ? {} : { turnIndex: eventTurnIndex }), ...(toolCalls ? { toolCallCount: toolCalls } : {}), summary: safeSummary, ...(toolAudit ? { toolAudit } : {}) });
       }
       if (event.type === 'auto_retry_start' || event.type === 'auto_retry_end' || event.type === 'compaction_start' || event.type === 'compaction_end') {
         this.logger?.info(summary, `pi ${role} session event`);
