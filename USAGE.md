@@ -13,7 +13,7 @@
 - 真实 Pi 由 `@earendil-works/pi-coding-agent` 驱动；`AgentRunner` 仍是编排边界，`FakePiRunner` 仅用于离线测试。
 - 图片识别默认是禁用适配器；内部视觉服务必须显式注入，并且只能使用私有网络地址。
 - 没有 GitLab API、Merge Request、自动合并、自动部署或生产环境访问能力。
-- 非 dry-run 模式只允许推送 `ai/*` 分支，并要求 `origin` 主机在 allow-list 中；推送目标是自己账号（`GITLAB_ACCOUNT`，默认 `codigger-llm`）在 `GITLAB_URL` GitLab 上的同名私有镜像仓库，仓库不存在时自动创建。PAT 优先取自 `GITLAB_TOKEN`，并只在进程内缓存；没有 PAT 时可用 `GITLAB_PASSWORD` 在当前进程中生成，Git 的网络操作通过主机限定的内存 credential helper 使用它，不读写 `~/.git-credentials`；推送也不会创建 MR 或合并。
+- 非 dry-run 模式只允许推送 `ai/*` 分支，并要求 `origin` 主机在 allow-list 中；推送目标是自己账号（`GITLAB_ACCOUNT`，默认 `codigger-llm`）在 `GITLAB_URL` GitLab 上的同名公开镜像仓库，仓库不存在时自动创建，已有私有仓库也会调整为公开。PAT 优先取自 `GITLAB_TOKEN`，并只在进程内缓存；没有 PAT 时可用 `GITLAB_PASSWORD` 在当前进程中生成，Git 的网络操作通过主机限定的内存 credential helper 使用它，不读写 `~/.git-credentials`；推送也不会创建 MR 或合并。
 - Intake 模型只负责提取事实、补问和整理草稿，不负责诊断根因、修改代码或运行命令。对于未配置的项目，Intake 可以收集远程 Git 地址并提出 Profile proposal；只有测试人员显式确认提交后，服务才会 clone 仓库并生成可执行 Profile。
 
 ## 2. 前置条件
@@ -74,8 +74,8 @@ cp .env.example .env
 | `VISION_HOST` | `disabled://local` | 宿主构造视觉适配器时使用的内部地址；禁用值不会发请求 |
 | `GIT_HOST` | `localhost` | Git 目标标识；非禁用主机必须通过 allow-list |
 | `GIT_ALLOWED_HOSTS` | `localhost` | 逗号分隔的 Git 主机白名单 |
-| `GITLAB_URL` | `http://172.29.100.126` | 自己账号私有镜像仓库所在的 GitLab 地址（见 `docs/gitlab-private-repo-api.md`）；设为空字符串则回退推送到 origin |
-| `GITLAB_ACCOUNT` | `codigger-llm` | 私有镜像仓库所属账号 |
+| `GITLAB_URL` | `http://172.29.100.126` | 自己账号公开镜像仓库所在的 GitLab 地址（见 `docs/gitlab-private-repo-api.md`）；设为空字符串则回退推送到 origin |
+| `GITLAB_ACCOUNT` | `codigger-llm` | 公开镜像仓库所属账号 |
 | `GITLAB_TOKEN` | 未设置 | GitLab PAT；进程内使用，不读写 `~/.git-credentials` |
 | `GITLAB_PASSWORD` | 未设置 | `GITLAB_TOKEN` 未设置时，可显式配置以在当前进程通过 Web 登录生成 PAT；源码没有默认密码 |
 
@@ -363,7 +363,7 @@ git-result.json   pipeline.json       diff.patch
 | Profile 文件被阻止 | 使用相对路径，确认文件存在、未符号链接到 root 外，且不超过 256 KiB |
 | setup/validation 失败 | 查看 `environment-run.json`、`validation.json` 及脱敏日志，单独在 worktree 中复现命令 |
 | Job 卡在 RUNNING | 先看 heartbeat；确认旧进程已停止后调用 `/api/ops/recover`，再人工 retry |
-| push 被拒绝 | 保持 `DRY_RUN=true` 做验证；确认当前分支是 `ai/*`、origin 存在且主机在 `GIT_ALLOWED_HOSTS` 与 `RepoManager.allowedRemoteHosts` 中；非 dry-run 推送目标是 `GITLAB_URL`（默认 `http://172.29.100.126`）上 `GITLAB_ACCOUNT` 账号的同名私有镜像仓库（不存在时自动创建），检查 `GITLAB_TOKEN` 是否有效，或确认 `GITLAB_PASSWORD` 能完成当前进程的 PAT bootstrap |
+| push 被拒绝 | 保持 `DRY_RUN=true` 做验证；确认当前分支是 `ai/*`、origin 存在且主机在 `GIT_ALLOWED_HOSTS` 与 `RepoManager.allowedRemoteHosts` 中；非 dry-run 推送目标是 `GITLAB_URL`（默认 `http://172.29.100.126`）上 `GITLAB_ACCOUNT` 账号的同名公开镜像仓库（不存在时自动创建），检查 `GITLAB_TOKEN` 是否有效，或确认 `GITLAB_PASSWORD` 能完成当前进程的 PAT bootstrap |
 | 图片没有识别结果 | 这是默认 disabled adapter 的预期行为；使用 `/internal/vision/analyze` 前必须注入附件服务和私有视觉 Provider |
 | 页面空白/404 | 宿主必须自行挂载三个 `render*Html()` 页面；BugApiServer 本身只提供 API |
 

@@ -9,9 +9,10 @@ const CREATED_PAGE = '<input type="text" id="created-personal-access-token" valu
 interface Call { url: string; method: string; body?: string; headers: Record<string, string> }
 
 /** Stateful fetch double covering the web-session and API flows. */
-function fakeGitLab(options: { projectExists?: boolean } = {}) {
+function fakeGitLab(options: { projectExists?: boolean; projectVisibility?: 'private' | 'public' } = {}) {
   const calls: Call[] = [];
   let patViews = 0;
+  const projectVisibility = options.projectVisibility ?? 'public';
   const fetchImpl = (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input);
     const headers = Object.fromEntries(Object.entries(init.headers ?? {}) as [string, string][]);
@@ -24,8 +25,11 @@ function fakeGitLab(options: { projectExists?: boolean } = {}) {
       return response(200, patViews === 1 ? PAT_PAGE : CREATED_PAGE);
     }
     if (url.endsWith('/profile/personal_access_tokens') && init.method === 'POST') return response(302, '');
-    if (url.includes('/api/v4/projects/')) return response(options.projectExists ? 200 : 404, options.projectExists ? '{"visibility":"private"}' : '{"message":"404 Project Not Found"}');
-    if (url.endsWith('/api/v4/projects') && init.method === 'POST') return response(201, '{"visibility":"private"}');
+    if (url.includes('/api/v4/projects/')) {
+      if (init.method === 'PUT') return response(200, '{"visibility":"public"}');
+      return response(options.projectExists ? 200 : 404, options.projectExists ? `{"visibility":"${projectVisibility}"}` : '{"message":"404 Project Not Found"}');
+    }
+    if (url.endsWith('/api/v4/projects') && init.method === 'POST') return response(201, '{"visibility":"public"}');
     return response(404, '');
   }) as unknown as typeof fetch;
   return { fetchImpl, calls };
@@ -65,7 +69,7 @@ describe('mirrorProjectName', () => {
 });
 
 describe('GitLabPushTarget', () => {
-  it('uses a configured PAT and creates a missing private project', async () => {
+  it('uses a configured PAT and creates a missing public project', async () => {
     const { fetchImpl, calls } = fakeGitLab({ projectExists: false });
     const url = await target({ token: 'pat-configured', fetchImpl }).ensureProject('storefront');
     expect(url).toBe('http://172.29.100.126/codigger-llm/storefront.git');
@@ -74,7 +78,7 @@ describe('GitLabPushTarget', () => {
       'POST http://172.29.100.126/api/v4/projects',
     ]);
     expect(calls[0].headers['PRIVATE-TOKEN']).toBe('pat-configured');
-    expect(calls[1].body).toContain('visibility=private');
+    expect(calls[1].body).toContain('visibility=public');
     expect(calls[1].body).toContain('name=storefront');
   });
 
@@ -84,6 +88,13 @@ describe('GitLabPushTarget', () => {
     expect(url).toBe('http://172.29.100.126/codigger-llm/storefront.git');
     expect(calls).toHaveLength(1);
     expect(calls[0].method).toBe('GET');
+  });
+
+  it('makes an existing private mirror project public', async () => {
+    const { fetchImpl, calls } = fakeGitLab({ projectExists: true, projectVisibility: 'private' });
+    await target({ token: 'pat-configured', fetchImpl }).ensureProject('storefront');
+    expect(calls.map((call) => call.method)).toEqual(['GET', 'PUT']);
+    expect(calls[1].body).toContain('visibility=public');
   });
 
   it('single-flights concurrent ensureProject calls for one mirror project', async () => {

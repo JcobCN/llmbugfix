@@ -8,12 +8,12 @@ import { KeyedAsyncMutex } from './mutex.js';
 export { GitLabPushTarget, mirrorProjectName } from './gitlab.js';
 export type { GitLabPushTargetOptions } from './gitlab.js';
 
-/** Creates/looks up the own-account private mirror project for a source remote. */
+/** Creates/looks up the own-account public mirror project for a source remote. */
 export interface OwnPushTarget { ensureProject(name: string): Promise<string>; }
 /** Supplies per-process Git credentials without using Git's credential files. */
 export interface GitCredentialProvider { gitCredentialEnvironment(): Promise<NodeJS.ProcessEnv>; }
 
-export interface RepoManagerOptions { worktreesRoot?: string; worktreeRoot?: string; repositoryRoot?: string; repositoryRoots?: string[]; /** Root used for remote repositories cloned from confirmed intake. */ cloneRoot?: string; allowedRemoteHost?: string; allowedRemoteHosts?: string[]; protectedBranches?: string[]; commandRunner?: CommandRunner; /** When set, ai/* branches are pushed to an own-account private mirror instead of origin. */ ownPushTarget?: OwnPushTarget; /** In-memory credentials used by networked Git commands. */ gitCredentialProvider?: GitCredentialProvider; }
+export interface RepoManagerOptions { worktreesRoot?: string; worktreeRoot?: string; repositoryRoot?: string; repositoryRoots?: string[]; /** Root used for remote repositories cloned from confirmed intake. */ cloneRoot?: string; allowedRemoteHost?: string; allowedRemoteHosts?: string[]; protectedBranches?: string[]; commandRunner?: CommandRunner; /** When set, ai/* branches are pushed to an own-account public mirror instead of origin. */ ownPushTarget?: OwnPushTarget; /** In-memory credentials used by networked Git commands. */ gitCredentialProvider?: GitCredentialProvider; }
 export interface GitOperationResult { exitCode: number; stdout: string; stderr: string; timedOut: boolean; }
 const within = (root: string, value: string) => value === root || value.startsWith(`${root}${path.sep}`);
 const BUG = /^BUG-[0-9]{6,}$/;
@@ -242,7 +242,7 @@ export class RepoManager {
     return repositoryMutex.runExclusive(repo, () => this.commitUnlocked(cwd, message));
   }
   /**
-   * Ensure a remote named `own` points at the private mirror of the source
+   * Ensure a remote named `own` points at the public mirror of the source
    * repository under the configured own account, creating the GitLab project
    * when it does not exist yet (see docs/gitlab-private-repo-api.md).
    */

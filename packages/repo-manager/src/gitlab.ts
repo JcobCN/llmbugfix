@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 /**
- * Push target that mirrors every fixed repository into a private project
+ * Push target that mirrors every fixed repository into a public project
  * under one own GitLab account (see docs/gitlab-private-repo-api.md).
  *
  * The GitLab instance is old, HTTP-only and 2FA-enabled, so both the API and
@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 export interface GitLabPushTargetOptions {
   /** GitLab base URL, e.g. http://172.29.100.126 */
   baseUrl: string;
-  /** Account namespace that owns the private mirror repositories. */
+  /** Account namespace that owns the public mirror repositories. */
   account: string;
   /** PAT kept in memory and used for both the API and Git operations. */
   token?: string;
@@ -111,7 +111,7 @@ export class GitLabPushTarget {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
-  /** Push URL of the own-account private project, creating it when missing. */
+  /** Push URL of the own-account public project, creating it when missing. */
   async ensureProject(name: string): Promise<string> {
     if (!PROJECT_NAME.test(name)) throw new Error(`Invalid mirror project name: ${name}`);
     const projectKey = `${this.base.origin}\0${this.account}\0${name}`;
@@ -132,17 +132,42 @@ export class GitLabPushTarget {
     const token = await this.resolveToken();
     const projectPath = encodeURIComponent(`${this.account}/${name}`);
     const check = await this.request('GET', `/api/v4/projects/${projectPath}`, { token });
-    if (check.status === 200) return this.projectUrl(name);
+    if (check.status === 200) {
+      await this.ensurePublicProject(projectPath, token, check.body);
+      return this.projectUrl(name);
+    }
     if (check.status !== 404) throw new Error(`GitLab project lookup failed (${check.status}): ${this.excerpt(check.body)}`);
     const created = await this.request('POST', '/api/v4/projects', {
       token,
-      form: new URLSearchParams({ name, path: name, visibility: 'private' }),
+      form: new URLSearchParams({ name, path: name, visibility: 'public' }),
     });
-    if (created.status === 201 || created.status === 200) return this.projectUrl(name);
+    if (created.status === 201 || created.status === 200) {
+      await this.ensurePublicProject(projectPath, token, created.body);
+      return this.projectUrl(name);
+    }
     // A concurrent creator outside this process may have won the race;
-    // treating GitLab's "taken" response as success is safe and idempotent.
-    if (created.status === 400 && /already (been )?taken/iu.test(created.body)) return this.projectUrl(name);
+    // re-read it and make sure it is public before treating the race as success.
+    if (created.status === 400 && /already (been )?taken/iu.test(created.body)) {
+      const existing = await this.request('GET', `/api/v4/projects/${projectPath}`, { token });
+      if (existing.status !== 200) throw new Error(`GitLab project lookup after concurrent creation failed (${existing.status}): ${this.excerpt(existing.body)}`);
+      await this.ensurePublicProject(projectPath, token, existing.body);
+      return this.projectUrl(name);
+    }
     throw new Error(`GitLab project creation failed (${created.status}): ${this.excerpt(created.body)}`);
+  }
+
+  private async ensurePublicProject(projectPath: string, token: string, body: string): Promise<void> {
+    let visibility: string | undefined;
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (parsed && typeof parsed === 'object' && 'visibility' in parsed && typeof parsed.visibility === 'string') visibility = parsed.visibility;
+    } catch { /* An older GitLab response may omit JSON; the update below is still safe. */ }
+    if (visibility?.toLowerCase() === 'public') return;
+    const updated = await this.request('PUT', `/api/v4/projects/${projectPath}`, {
+      token,
+      form: new URLSearchParams({ visibility: 'public' }),
+    });
+    if (updated.status !== 200 && updated.status !== 201) throw new Error(`GitLab project visibility update failed (${updated.status}): ${this.excerpt(updated.body)}`);
   }
 
   private projectUrl(name: string): string { return `${this.base.href.replace(/\/+$/u, '')}/${this.account}/${name}.git`; }
@@ -214,7 +239,7 @@ export class GitLabPushTarget {
   }
 
   private async request(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'PUT',
     pathname: string,
     options: { token?: string; form?: URLSearchParams; jar?: CookieJar } = {},
   ): Promise<{ status: number; body: string }> {

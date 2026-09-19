@@ -115,7 +115,7 @@ if (llmEnabled) {
   const repositoriesRoot = path.resolve(config.DATA_ROOT, 'repositories');
   const repositories = profiles.map((profile) => profile.repository);
   const allowedRemoteHosts = (process.env.GIT_ALLOWED_HOSTS ?? '').split(',').map((h) => h.trim()).filter(Boolean);
-  // ai/* fix branches are mirrored into a private project under the own
+  // ai/* fix branches are mirrored into a public project under the own
   // GitLab account (docs/gitlab-private-repo-api.md). GITLAB_URL defaults to
   // the internal instance; set it to an empty string to push to origin instead.
   const gitlabUrl = process.env.GITLAB_URL !== undefined ? process.env.GITLAB_URL.trim() : 'http://172.29.100.126';
